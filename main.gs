@@ -59,14 +59,15 @@ function getDefaultState() {
 }
 
 function getState() {
-  const properties = PropertiesService.getScriptProperties();
-  const stateJson = properties.getProperty(STATE_KEY);
+  const cache = CacheService.getScriptCache();
+  const stateJson = cache.get(STATE_KEY);
   return stateJson ? JSON.parse(stateJson) : getDefaultState();
 }
 
 function setState(state) {
+  const cache = CacheService.getScriptCache();
   const stateJson = JSON.stringify(state, null, 2);
-  PropertiesService.getScriptProperties().setProperty(STATE_KEY, stateJson);
+  cache.put(STATE_KEY, stateJson, 21600); // 6 hours expiration
 }
 
 
@@ -160,6 +161,7 @@ function mainTriggerHandler() {
     if (state.status === 'RUNNING') {
       deleteTriggers();
       state.message = "一時中断中... 次の処理を準備しています。";
+      setState(state);
       ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
     } else {
       deleteTriggers();
@@ -177,6 +179,7 @@ function mainTriggerHandler() {
 }
 
 function runPlanningPhase(state, startTime) {
+    let lastSaveTime = Date.now();
     while (state.scanQueue.length > 0 && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
         const item = state.scanQueue.shift();
         const parentMap = (item.type === 'source') ? state.sourceMap : state.destMap;
@@ -195,6 +198,10 @@ function runPlanningPhase(state, startTime) {
             } else {
                 if (item.type === 'source') state.totalFiles++;
             }
+        }
+        if (Date.now() - lastSaveTime > 2000) {
+          setState(state);
+          lastSaveTime = Date.now();
         }
     }
     if (state.scanQueue.length === 0) {
@@ -250,6 +257,7 @@ function runGenerateActionsPhase(state) {
 }
 
 function runExecutingPhase(state, startTime) {
+    let lastSaveTime = Date.now();
     try {
         while (state.actions.length > state.processedActions && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
             const action = state.actions[state.processedActions];
@@ -263,7 +271,14 @@ function runExecutingPhase(state, startTime) {
                 throw new Error(`親フォルダが見つかりません: ${action.path}`);
             }
 
-            state.message = `処理中: ${action.path} ${progress}`;
+            let actionText = '';
+            switch(action.type) {
+                case 'CREATE_FOLDER': actionText = 'フォルダ作成'; break;
+                case 'COPY_FILE': actionText = 'ファイルコピー'; break;
+                case 'UPDATE_FILE': actionText = 'ファイル更新'; break;
+                default: actionText = '処理中';
+            }
+            state.message = `${actionText}: ${action.path} ${progress}`;
 
             switch(action.type) {
                 case 'CREATE_FOLDER':
@@ -284,6 +299,10 @@ function runExecutingPhase(state, startTime) {
                     break;
             }
             state.processedActions++;
+            if (Date.now() - lastSaveTime > 2000) {
+              setState(state);
+              lastSaveTime = Date.now();
+            }
         }
     } catch (e) {
         const failedAction = state.actions[state.processedActions];
@@ -295,6 +314,7 @@ function runExecutingPhase(state, startTime) {
         state.status = 'DONE';
         const elapsedTime = (Date.now() - state.startTime) / 1000;
         state.message = `同期が完了しました。(${state.totalFolders}フォルダ, ${state.totalFiles}ファイル) 経過時間: ${Math.round(elapsedTime)}秒`;
+        setState(state);
     }
     return state;
 }

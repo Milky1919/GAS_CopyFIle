@@ -113,13 +113,22 @@
           statusDiv.className = 'done';
           setControlsState(false);
           stopTimer(state.startTime);
-          clearInterval(poller);
+          if (poller) {
+            clearInterval(poller);
+            poller = null;
+            setTimeout(pollStatus, 1000);
+            setTimeout(pollStatus, 3000);
+          }
           break;
         case 'ERROR':
           statusDiv.className = 'error';
           setControlsState(false);
           stopTimer();
-          clearInterval(poller);
+          if (poller) {
+            clearInterval(poller);
+            poller = null;
+            setTimeout(pollStatus, 1000);
+          }
           break;
         case 'IDLE':
         default:
