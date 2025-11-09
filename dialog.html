@@ -1,90 +1,171 @@
-<!-- --------------------------------- -->
-<!-- UI定義ファイル（dialog.html） -->
-<!-- --------------------------------- -->
 <!DOCTYPE html>
 <html>
-  <head>
-    <base target="_top">
-    <!-- Google標準のCSSを適用 -->
-    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/styles.css">
-    <style>
-      body { padding: 20px; font-family: Arial, sans-serif; }
-      .form-group { margin-bottom: 15px; }
-      label { display: block; margin-bottom: 5px; font-weight: bold; }
-      input[type="text"] { width: 100%; box-sizing: border-box; }
-      .button-bar { margin-top: 20px; }
-      #message { margin-top: 15px; font-size: 0.9em; }
-      .loading { color: #888; }
-      .error { color: red; }
-    </style>
-  </head>
-  <body>
-    <h3>フォルダコピー設定</h3>
-    <p>コピー元・コピー先のフォルダIDまたはURL、<br>コピー先に作成するフォルダ名を入力してください。</p>
+<head>
+  <base target="_top">
+  <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/styles.css">
+  <style>
+    body { padding: 20px; font-family: Arial, sans-serif; }
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; font-weight: bold; }
+    input[type="text"] { width: 100%; box-sizing: border-box; }
+    .button-bar { margin-top: 20px; display: flex; justify-content: space-between; }
+    #status-container { margin-top: 20px; padding: 10px; border: 1px solid #ccc; background-color: #f9f9f9; min-height: 50px; }
+    #timer { float: right; color: #666; font-size: 0.9em; }
+    .running { color: #0072c6; }
+    .done { color: #107c10; }
+    .error { color: #d83b01; font-weight: bold; }
+    .idle { color: #555; }
+  </style>
+</head>
+<body>
+  <h3>フォルダ同期設定</h3>
+  <p>コピー元と同期先のフォルダID（またはURL）を入力してください。<br>同期先に存在しないファイルやフォルダがコピーされます。</p>
 
-    <div class="form-group">
-      <label for="sourceFolder">1. コピー元のフォルダID (または URL)</label>
-      <input type="text" id="sourceFolder" class="action">
+  <div class="form-group">
+    <label for="sourceFolder">1. コピー元フォルダ</label>
+    <input type="text" id="sourceFolder" placeholder="例: 1a2b3c...">
+  </div>
+
+  <div class="form-group">
+    <label for="destFolder">2. 同期先フォルダ</label>
+    <input type="text" id="destFolder" placeholder="例: 4x5y6z...">
+  </div>
+
+  <div class="button-bar">
+    <div>
+      <button id="startButton" class="action" onclick="startSync()">同期を開始</button>
+      <button id="stopButton" onclick="stopSync()">強制停止</button>
     </div>
+    <button onclick="google.script.host.close()">閉じる</button>
+  </div>
 
-    <div class="form-group">
-      <label for="destParentFolder">2. コピー先の親フォルダID (または URL)</label>
-      <input type="text" id="destParentFolder" class="action">
-    </div>
+  <div id="status-container">
+    <div id="timer">経過時間: 0秒</div>
+    <h4>現在のステータス</h4>
+    <div id="status" class="idle">待機中</div>
+  </div>
 
-    <div class="form-group">
-      <label for="newFolderName">3. コピー先に作成するフォルダ名</label>
-      <input type="text" id="newFolderName" class="action">
-    </div>
+  <script>
+    let poller;
+    let timerInterval;
 
-    <div class="button-bar">
-      <button id="submitButton" class="action" onclick="submitForm()">コピーを実行</button>
-      <button onclick="google.script.host.close()">閉じる</button>
-    </div>
+    document.addEventListener('DOMContentLoaded', () => {
+      pollStatus();
+      poller = setInterval(pollStatus, 2000); // ポーリング間隔を2秒に短縮
+    });
 
-    <div id="message"></div>
+    function startSync() {
+      const sourceFolder = document.getElementById('sourceFolder').value;
+      const destFolder = document.getElementById('destFolder').value;
+      if (!sourceFolder || !destFolder) {
+        updateStatus({ status: 'ERROR', message: 'コピー元と同期先の両方を入力してください。' });
+        return;
+      }
+      setControlsState(true);
+      updateStatus({ status: 'RUNNING', message: '同期ジョブを開始しています...' });
+      const folderIds = { sourceFolder, destFolder };
+      google.script.run
+        .withSuccessHandler(() => pollStatus())
+        .withFailureHandler(handleFailure)
+        .startSyncJob(folderIds);
+    }
 
-    <script>
-      function submitForm() {
-        const submitBtn = document.getElementById('submitButton');
-        const messageDiv = document.getElementById('message');
-        
-        // 処理中はボタンを無効化
-        submitBtn.disabled = true;
-        messageDiv.textContent = 'コピー処理を実行中です...（ファイル数が多いと時間がかかります）';
-        messageDiv.className = 'loading';
+    function stopSync() {
+      setControlsState(true);
+      updateStatus({ status: 'IDLE', message: 'ジョブを停止しています...' });
+      google.script.run
+        .withSuccessHandler(() => {
+          pollStatus();
+          stopTimer();
+        })
+        .withFailureHandler(handleFailure)
+        .stopSyncJob();
+    }
 
-        // フォームデータをオブジェクトとして取得
-        const formData = {
-          sourceFolder: document.getElementById('sourceFolder').value,
-          destParentFolder: document.getElementById('destParentFolder').value,
-          newFolderName: document.getElementById('newFolderName').value
-        };
-        
-        // GASサーバー側の 'startFolderCopy' 関数を呼び出す
-        google.script.run
-          .withSuccessHandler(onSuccess)
-          .withFailureHandler(onFailure)
-          .startFolderCopy(formData);
+    function pollStatus() {
+      google.script.run
+        .withSuccessHandler(updateStatus)
+        .withFailureHandler(handleFailure)
+        .getSyncStatus();
+    }
+
+    function updateStatus(state) {
+      const statusDiv = document.getElementById('status');
+      if (!state) {
+        statusDiv.className = 'error';
+        statusDiv.textContent = 'ステータスを取得できませんでした。';
+        setControlsState(false);
+        stopTimer();
+        return;
       }
 
-      // 成功時のコールバック
-      function onSuccess(message) {
-        // 成功したらダイアログを閉じる
-        google.script.host.close();
-        // 完了メッセージは .gs 側の ui.alert で表示される
-      }
+      if (state.sourceFolderId) document.getElementById('sourceFolder').value = state.sourceFolderId;
+      if (state.destFolderId) document.getElementById('destFolder').value = state.destFolderId;
+      statusDiv.textContent = state.message || state.status;
 
-      // 失敗時のコールバック
-      function onFailure(error) {
-        const messageDiv = document.getElementById('message');
-        messageDiv.textContent = 'エラー: ' + error.message;
-        messageDiv.className = 'error';
-        
-        // ボタンを再度有効化
-        document.getElementById('submitButton').disabled = false;
-        // 失敗メッセージは .gs 側の ui.alert でも表示される
+      switch(state.status) {
+        case 'RUNNING':
+          statusDiv.className = 'running';
+          setControlsState(true);
+          startTimer(state.startTime);
+          break;
+        case 'DONE':
+          statusDiv.className = 'done';
+          setControlsState(false);
+          stopTimer(state.startTime);
+          clearInterval(poller);
+          break;
+        case 'ERROR':
+          statusDiv.className = 'error';
+          setControlsState(false);
+          stopTimer();
+          clearInterval(poller);
+          break;
+        case 'IDLE':
+        default:
+          statusDiv.className = 'idle';
+          setControlsState(false);
+          stopTimer();
+          break;
       }
-    </script>
-  </body>
+    }
+
+    function handleFailure(error) {
+      updateStatus({ status: 'ERROR', message: error.message });
+      clearInterval(poller);
+      stopTimer();
+    }
+
+    function setControlsState(syncing) {
+      document.getElementById('startButton').disabled = syncing;
+      document.getElementById('sourceFolder').disabled = syncing;
+      document.getElementById('destFolder').disabled = syncing;
+    }
+
+    function startTimer(startTime) {
+      if (timerInterval || !startTime) return;
+      const timerDiv = document.getElementById('timer');
+      timerInterval = setInterval(() => {
+        const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+        const minutes = Math.floor(elapsedSeconds / 60);
+        const seconds = elapsedSeconds % 60;
+        timerDiv.textContent = `経過時間: ${minutes}分 ${seconds}秒`;
+      }, 1000);
+    }
+
+    function stopTimer(startTime) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+      const timerDiv = document.getElementById('timer');
+      if (startTime) {
+          const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+          const minutes = Math.floor(elapsedSeconds / 60);
+          const seconds = elapsedSeconds % 60;
+          timerDiv.textContent = `経過時間: ${minutes}分 ${seconds}秒`;
+      } else {
+          timerDiv.textContent = "経過時間: 0秒";
+      }
+    }
+  </script>
+</body>
 </html>
