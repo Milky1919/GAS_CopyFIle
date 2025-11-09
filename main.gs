@@ -84,8 +84,11 @@ function startSyncJob(folderIds) {
     };
     setState(initialState);
 
-    ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(10 * 1000).create();
+    // 最初のトリガーを10秒後に設定
+    const trigger = ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(10 * 1000).create();
+    Logger.log(`Trigger created successfully. ID: ${trigger.getUniqueId()}`);
   } catch (e) {
+    Logger.log(`Error in startSyncJob: ${e.stack}`);
     setState({ ...getState(), status: 'ERROR', message: e.message, lastError: e.message });
     throw e;
   }
@@ -106,13 +109,15 @@ function stopSyncJob() {
  * フォルダキューを処理するメイン関数。トリガーによって定期的に実行される。
  */
 function processFolderQueue() {
-  Logger.log('processFolderQueue triggered.');
+  Logger.log('--- processFolderQueue triggered ---');
   const startTime = Date.now();
   let state = getState();
 
+  Logger.log(`Current state: ${JSON.stringify(state, null, 2)}`);
+
   if (state.status !== 'RUNNING') {
-    Logger.log('ステータスが "RUNNING" ではないため、処理をスキップしました。');
-    deleteTriggers(); // 不要なトリガーを削除
+    Logger.log(`Execution skipped. Status is "${state.status}", not "RUNNING".`);
+    deleteTriggers(); // Clean up unnecessary triggers.
     return;
   }
 
@@ -196,6 +201,7 @@ function processFolderQueue() {
     }
 
   } catch (e) {
+    Logger.log(`ERROR in processFolderQueue: ${JSON.stringify(e, null, 2)}`);
     state.status = 'ERROR';
     state.message = `エラーが発生しました: ${e.message}`;
     state.lastError = e.stack;
