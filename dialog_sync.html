@@ -1,0 +1,182 @@
+<!-- --------------------------------- -->
+<!-- 差分更新用 UI (dialog_sync.html) -->
+<!-- --------------------------------- -->
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/styles.css">
+    <style>
+      body { padding: 20px; font-family: Arial, sans-serif; }
+      .form-group { margin-bottom: 15px; }
+      label { display: block; margin-bottom: 5px; font-weight: bold; }
+      input[type="text"] { width: 100%; box-sizing: border-box; }
+      .button-bar { margin-top: 20px; }
+      
+      /* 進捗表示エリア */
+      #progress-area { 
+        margin-top: 20px; 
+        border: 1px solid #ccc; 
+        padding: 10px; 
+        border-radius: 4px;
+        display: none; /* 初期状態では非表示 */
+      }
+      #status-text { font-size: 0.9em; margin-bottom: 5px; }
+      #timer { font-size: 0.9em; color: #555; }
+      #progress-bar-container {
+        width: 100%;
+        background-color: #eee;
+        border-radius: 4px;
+        height: 20px;
+        margin-top: 5px;
+      }
+      #progress-bar {
+        width: 0%;
+        height: 20px;
+        background-color: #4CAF50; /* 緑色 */
+        border-radius: 4px;
+        text-align: center;
+        line-height: 20px;
+        color: white;
+        font-size: 0.8em;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>[2] 差分更新 (リジューム)</h3>
+    <p>コピー元と、更新先（コピー済みのフォルダ）のID/URLを入力してください。</p>
+
+    <div class="form-group">
+      <label for="sourceFolder">1. コピー元のフォルダID (または URL)</label>
+      <input type="text" id="sourceFolder" class="action">
+    </div>
+
+    <div class="form-group">
+      <label for="destFolder">2. 更新先のフォルダID (または URL)</label>
+      <input type="text" id="destFolder" class="action">
+    </div>
+
+    <div class="button-bar">
+      <button id="submitButton" class="action" onclick="submitSyncForm()">差分更新を実行</button>
+      <button id="closeButton" onclick="google.script.host.close()">閉じる</button>
+    </div>
+
+    <!-- 進捗表示エリア -->
+    <div id="progress-area">
+      <div id="status-text">処理を開始しています...</div>
+      <div id="timer">経過時間: 0秒</div>
+      <div id="progress-bar-container">
+        <div id="progress-bar">0%</div>
+      </div>
+    </div>
+    
+    <div id="error-message" style="color: red; margin-top: 10px;"></div>
+
+
+    <script>
+      let timerInterval = null;
+      let progressInterval = null;
+      let startTime = 0;
+
+      function submitSyncForm() {
+        // UIをロック
+        document.getElementById('submitButton').disabled = true;
+        document.getElementById('closeButton').disabled = true;
+        document.getElementById('sourceFolder').disabled = true;
+        document.getElementById('destFolder').disabled = true;
+        document.getElementById('error-message').textContent = '';
+        
+        // 進捗エリアを表示
+        document.getElementById('progress-area').style.display = 'block';
+        document.getElementById('status-text').textContent = '処理を初期化中...';
+
+        const formData = {
+          sourceFolder: document.getElementById('sourceFolder').value,
+          destFolder: document.getElementById('destFolder').value
+        };
+        
+        // メインの処理を非同期で開始
+        google.script.run
+          .withSuccessHandler(onSyncSuccess)
+          .withFailureHandler(onSyncFailure)
+          .startFolderSync(formData);
+        
+        // 時間カウンターを開始
+        startTime = new Date().getTime();
+        timerInterval = setInterval(updateTimer, 1000);
+        
+        // 進捗ポーリングを開始 (2秒ごと)
+        progressInterval = setInterval(updateProgress, 2000);
+      }
+
+      function updateTimer() {
+        const now = new Date().getTime();
+        const elapsed = Math.floor((now - startTime) / 1000);
+        document.getElementById('timer').textContent = `経過時間: ${elapsed}秒`;
+      }
+
+      function updateProgress() {
+        google.script.run
+          .withSuccessHandler(onProgressUpdate)
+          .withFailureHandler(onProgressFailure) // 通信エラーなど
+          .getSyncProgress();
+      }
+      
+      function onProgressUpdate(progress) {
+        document.getElementById('status-text').textContent = progress.status;
+        
+        let percent = 0;
+        if (progress.total > 0) {
+          percent = Math.floor((progress.processed / progress.total) * 100);
+        }
+        
+        const progressBar = document.getElementById('progress-bar');
+        progressBar.style.width = percent + '%';
+        progressBar.textContent = `${percent}% (${progress.processed} / ${progress.total} ファイル)`;
+        
+        // サーバー側で完了・エラーを検知したらポーリング停止
+        if (progress.status.startsWith('完了') || progress.status.startsWith('エラー')) {
+           stopIntervals();
+        }
+      }
+      
+      function onProgressFailure(error) {
+        // ポーリング失敗
+        document.getElementById('status-text').textContent = `進捗の取得に失敗: ${error.message}`;
+      }
+
+      function stopIntervals() {
+        if (timerInterval) {
+          clearInterval(timerInterval);
+          timerInterval = null;
+        }
+        if (progressInterval) {
+          clearInterval(progressInterval);
+          progressInterval = null;
+        }
+      }
+
+      // メイン処理(startFolderSync)が完了したときのコールバック
+      function onSyncSuccess(message) {
+        stopIntervals();
+        document.getElementById('status-text').textContent = '完了';
+        document.getElementById('closeButton').disabled = false;
+        // 完了アラートは .gs 側で表示される
+        google.script.host.close();
+      }
+
+      // メイン処理(startFolderSync)が失敗したときのコールバック
+      function onSyncFailure(error) {
+        stopIntervals();
+        document.getElementById('progress-area').style.display = 'none'; // 進捗を隠す
+        document.getElementById('error-message').textContent = 'エラー: ' + error.message;
+        
+        // UIロックを解除
+        document.getElementById('submitButton').disabled = false;
+        document.getElementById('closeButton').disabled = false;
+        document.getElementById('sourceFolder').disabled = false;
+        document.getElementById('destFolder').disabled = false;
+      }
+    </script>
+  </body>
+</html>

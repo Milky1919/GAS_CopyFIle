@@ -1,0 +1,90 @@
+<!-- --------------------------------- -->
+<!-- UI定義ファイル（dialog.html） -->
+<!-- --------------------------------- -->
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <!-- Google標準のCSSを適用 -->
+    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/styles.css">
+    <style>
+      body { padding: 20px; font-family: Arial, sans-serif; }
+      .form-group { margin-bottom: 15px; }
+      label { display: block; margin-bottom: 5px; font-weight: bold; }
+      input[type="text"] { width: 100%; box-sizing: border-box; }
+      .button-bar { margin-top: 20px; }
+      #message { margin-top: 15px; font-size: 0.9em; }
+      .loading { color: #888; }
+      .error { color: red; }
+    </style>
+  </head>
+  <body>
+    <h3>フォルダコピー設定</h3>
+    <p>コピー元・コピー先のフォルダIDまたはURL、<br>コピー先に作成するフォルダ名を入力してください。</p>
+
+    <div class="form-group">
+      <label for="sourceFolder">1. コピー元のフォルダID (または URL)</label>
+      <input type="text" id="sourceFolder" class="action">
+    </div>
+
+    <div class="form-group">
+      <label for="destParentFolder">2. コピー先の親フォルダID (または URL)</label>
+      <input type="text" id="destParentFolder" class="action">
+    </div>
+
+    <div class="form-group">
+      <label for="newFolderName">3. コピー先に作成するフォルダ名</label>
+      <input type="text" id="newFolderName" class="action">
+    </div>
+
+    <div class="button-bar">
+      <button id="submitButton" class="action" onclick="submitForm()">コピーを実行</button>
+      <button onclick="google.script.host.close()">閉じる</button>
+    </div>
+
+    <div id="message"></div>
+
+    <script>
+      function submitForm() {
+        const submitBtn = document.getElementById('submitButton');
+        const messageDiv = document.getElementById('message');
+        
+        // 処理中はボタンを無効化
+        submitBtn.disabled = true;
+        messageDiv.textContent = 'コピー処理を実行中です...（ファイル数が多いと時間がかかります）';
+        messageDiv.className = 'loading';
+
+        // フォームデータをオブジェクトとして取得
+        const formData = {
+          sourceFolder: document.getElementById('sourceFolder').value,
+          destParentFolder: document.getElementById('destParentFolder').value,
+          newFolderName: document.getElementById('newFolderName').value
+        };
+        
+        // GASサーバー側の 'startFolderCopy' 関数を呼び出す
+        google.script.run
+          .withSuccessHandler(onSuccess)
+          .withFailureHandler(onFailure)
+          .startFolderCopy(formData);
+      }
+
+      // 成功時のコールバック
+      function onSuccess(message) {
+        // 成功したらダイアログを閉じる
+        google.script.host.close();
+        // 完了メッセージは .gs 側の ui.alert で表示される
+      }
+
+      // 失敗時のコールバック
+      function onFailure(error) {
+        const messageDiv = document.getElementById('message');
+        messageDiv.textContent = 'エラー: ' + error.message;
+        messageDiv.className = 'error';
+        
+        // ボタンを再度有効化
+        document.getElementById('submitButton').disabled = false;
+        // 失敗メッセージは .gs 側の ui.alert でも表示される
+      }
+    </script>
+  </body>
+</html>
