@@ -8,8 +8,8 @@ const STATE_KEY = 'SYNC_STATE';
 // 処理を再開するためのトリガーとして設定する関数名
 const TRIGGER_HANDLER_NAME = 'mainTriggerHandler';
 
-// 実行時間の上限（ミリ秒）。GASの上限30分に対し、安全マージンをとって25分に設定。
-const EXECUTION_LIMIT_MS = 25 * 60 * 1000;
+// 実行時間の上限（ミリ秒）。GASの上限は約6分のため、安全マージンをとって5分に設定。
+const EXECUTION_LIMIT_MS = 5 * 60 * 1000;
 
 
 // =================================================
@@ -159,6 +159,7 @@ function mainTriggerHandler() {
 
     if (state.status === 'RUNNING') {
       deleteTriggers();
+      state.message = "一時中断中... 次の処理を準備しています。";
       ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
     } else {
       deleteTriggers();
@@ -180,7 +181,7 @@ function runPlanningPhase(state, startTime) {
         const item = state.scanQueue.shift();
         const parentMap = (item.type === 'source') ? state.sourceMap : state.destMap;
         state.message = `フォルダ情報をスキャン中: ${item.path || '/'}`;
-        setState(state);
+
         const children = getChildren(item.folderId);
         let currentPathMap = getObjectByPath(parentMap, item.path);
 
@@ -204,7 +205,6 @@ function runPlanningPhase(state, startTime) {
 
 function runGenerateActionsPhase(state) {
     state.message = "変更点を分析し、同期計画を作成しています...";
-    setState(state);
     const actions = [];
     const addActionsForNewFolder = (sourceNode, parentPath) => {
         for (const name in sourceNode.children) {
@@ -263,37 +263,32 @@ function runExecutingPhase(state, startTime) {
                 throw new Error(`親フォルダが見つかりません: ${action.path}`);
             }
 
-            Logger.log(`実行中: ${action.type} - ${action.path}`);
+            state.message = `処理中: ${action.path} ${progress}`;
 
             switch(action.type) {
                 case 'CREATE_FOLDER':
-                    state.message = `フォルダ作成中: ${action.path} ${progress}`;
                     const newFolder = { name: fileName, parents: [parentNode.id], mimeType: 'application/vnd.google-apps.folder' };
                     const createdFolder = Drive.Files.create(newFolder, null, { supportsAllDrives: true, fields: 'id' });
                     parentNode.children[fileName] = { id: createdFolder.id, type: 'folder', children: {} };
-                    Logger.log(`作成成功: ${createdFolder.id}`);
                     break;
 
                 case 'COPY_FILE':
-                    state.message = `ファイルコピー中: ${action.path} ${progress}`;
                     const copyResource = { name: fileName, parents: [parentNode.id] };
                     Drive.Files.copy(copyResource, action.sourceId, { supportsAllDrives: true });
                     break;
 
                 case 'UPDATE_FILE':
-                     state.message = `ファイル更新中: ${action.path} ${progress}`;
                      Drive.Files.remove(action.destId, { supportsAllDrives: true });
                      const updateResource = { name: fileName, parents: [parentNode.id] };
                      Drive.Files.copy(updateResource, action.sourceId, { supportsAllDrives: true });
                     break;
             }
             state.processedActions++;
-            setState(state);
         }
     } catch (e) {
         const failedAction = state.actions[state.processedActions];
         Logger.log(`実行エラー: アクション=${JSON.stringify(failedAction)}, エラー=${e.stack}`);
-        throw e; // mainTriggerHandlerでキャッチさせる
+        throw new Error(`アクション ${failedAction.type} に失敗しました: ${failedAction.path}. 原因: ${e.message}`);
     }
 
     if (state.actions.length <= state.processedActions) {
