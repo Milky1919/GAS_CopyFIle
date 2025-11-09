@@ -157,7 +157,6 @@ function mainTriggerHandler() {
       state = runExecutingPhase(state, startTime);
     }
 
-    // Check for completion or set next trigger
     if (state.status === 'RUNNING') {
       deleteTriggers();
       ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
@@ -166,7 +165,7 @@ function mainTriggerHandler() {
     }
 
   } catch (e) {
-    Logger.log(`ERROR in mainTriggerHandler: ${JSON.stringify(e, null, 2)}`);
+    Logger.log(`ERROR in mainTriggerHandler: ${e.stack}`);
     state.status = 'ERROR';
     state.message = `エラーが発生しました: ${e.message}`;
     state.lastError = e.stack;
@@ -176,27 +175,19 @@ function mainTriggerHandler() {
   }
 }
 
-/**
- * PLANNINGフェーズ: ソースと宛先のフォルダ構造をスキャンしてマップを構築
- */
 function runPlanningPhase(state, startTime) {
     while (state.scanQueue.length > 0 && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
         const item = state.scanQueue.shift();
         const parentMap = (item.type === 'source') ? state.sourceMap : state.destMap;
-
         state.message = `フォルダ情報をスキャン中: ${item.path || '/'}`;
-        setState(state); // Update message in UI
-
+        setState(state);
         const children = getChildren(item.folderId);
-
         let currentPathMap = getObjectByPath(parentMap, item.path);
 
         for (const child of children) {
             const childPath = item.path ? `${item.path}/${child.name}` : child.name;
             const isFolder = child.mimeType === 'application/vnd.google-apps.folder';
-
             currentPathMap.children[child.name] = { id: child.id, type: isFolder ? 'folder' : 'file', modifiedTime: child.modifiedTime, children: isFolder ? {} : undefined };
-
             if (isFolder) {
                 state.scanQueue.push({ type: item.type, folderId: child.id, path: childPath });
                 if (item.type === 'source') state.totalFolders++;
@@ -205,95 +196,104 @@ function runPlanningPhase(state, startTime) {
             }
         }
     }
-
     if (state.scanQueue.length === 0) {
         state.phase = 'GENERATING_ACTIONS';
     }
-
     return state;
 }
 
-/**
- * GENERATING_ACTIONSフェーズ: マップを比較して実行アクションリストを作成
- */
 function runGenerateActionsPhase(state) {
     state.message = "変更点を分析し、同期計画を作成しています...";
     setState(state);
-
     const actions = [];
+    const addActionsForNewFolder = (sourceNode, parentPath) => {
+        for (const name in sourceNode.children) {
+            const child = sourceNode.children[name];
+            const currentPath = parentPath ? `${parentPath}/${name}` : name;
+            if (child.type === 'folder') {
+                actions.push({ type: 'CREATE_FOLDER', path: currentPath });
+                addActionsForNewFolder(child, currentPath);
+            } else {
+                actions.push({ type: 'COPY_FILE', path: currentPath, sourceId: child.id });
+            }
+        }
+    };
     const compareFolders = (sourceNode, destNode, path) => {
-        // Source children
         for (const name in sourceNode.children) {
             const sourceChild = sourceNode.children[name];
             const destChild = destNode.children[name];
             const currentPath = path ? `${path}/${name}` : name;
-
             if (!destChild) {
-                // Destination does not have this item, needs creation
-                actions.push({ type: sourceChild.type === 'folder' ? 'CREATE_FOLDER' : 'COPY_FILE', path: currentPath, sourceId: sourceChild.id, destParentId: destNode.id });
+                if (sourceChild.type === 'folder') {
+                    actions.push({ type: 'CREATE_FOLDER', path: currentPath });
+                    addActionsForNewFolder(sourceChild, currentPath);
+                } else {
+                    actions.push({ type: 'COPY_FILE', path: currentPath, sourceId: sourceChild.id });
+                }
             } else {
                  if (sourceChild.type === 'file' && destChild.type === 'file') {
                     const sourceModified = new Date(sourceChild.modifiedTime).getTime();
                     const destModified = new Date(destChild.modifiedTime).getTime();
                     if (sourceModified > destModified) {
-                        actions.push({ type: 'UPDATE_FILE', path: currentPath, sourceId: sourceChild.id, destId: destChild.id, destParentId: destNode.id });
+                        actions.push({ type: 'UPDATE_FILE', path: currentPath, sourceId: sourceChild.id, destId: destChild.id });
                     }
+                } else if (sourceChild.type === 'folder' && destChild.type === 'folder') {
+                    compareFolders(sourceChild, destChild, currentPath);
                 }
-            }
-
-            // If both are folders, recurse
-            if (sourceChild.type === 'folder' && destChild && destChild.type === 'folder') {
-                compareFolders(sourceChild, destChild, currentPath);
             }
         }
     };
-
     compareFolders(state.sourceMap[''], state.destMap[''], '');
     state.actions = actions;
     state.phase = 'EXECUTING';
     return state;
 }
 
-
-/**
- * EXECUTINGフェーズ: 生成されたアクションリストを実行
- */
 function runExecutingPhase(state, startTime) {
-    while (state.actions.length > state.processedActions && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
-        const action = state.actions[state.processedActions];
-        const progress = `(${state.processedActions + 1}/${state.actions.length})`;
+    try {
+        while (state.actions.length > state.processedActions && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
+            const action = state.actions[state.processedActions];
+            const progress = `(${state.processedActions + 1}/${state.actions.length})`;
 
-        try {
+            const parentPath = getParentPath(action.path);
+            const fileName = getFileName(action.path);
+            const parentNode = getObjectByPath(state.destMap, parentPath);
+
+            if (!parentNode) {
+                throw new Error(`親フォルダが見つかりません: ${action.path}`);
+            }
+
+            Logger.log(`実行中: ${action.type} - ${action.path}`);
+
             switch(action.type) {
                 case 'CREATE_FOLDER':
                     state.message = `フォルダ作成中: ${action.path} ${progress}`;
-                    const parentFolderInDest = getObjectByPath(state.destMap, getParentPath(action.path));
-                    const newFolder = { name: getFileName(action.path), parents: [parentFolderInDest.id], mimeType: 'application/vnd.google-apps.folder' };
+                    const newFolder = { name: fileName, parents: [parentNode.id], mimeType: 'application/vnd.google-apps.folder' };
                     const createdFolder = Drive.Files.create(newFolder, null, { supportsAllDrives: true, fields: 'id' });
-                    // Add new folder to destMap to allow children to be added to it
-                    parentFolderInDest.children[getFileName(action.path)] = { id: createdFolder.id, type: 'folder', children: {} };
+                    parentNode.children[fileName] = { id: createdFolder.id, type: 'folder', children: {} };
+                    Logger.log(`作成成功: ${createdFolder.id}`);
                     break;
 
                 case 'COPY_FILE':
                     state.message = `ファイルコピー中: ${action.path} ${progress}`;
-                    const copyResource = { name: getFileName(action.path), parents: [action.destParentId] };
+                    const copyResource = { name: fileName, parents: [parentNode.id] };
                     Drive.Files.copy(copyResource, action.sourceId, { supportsAllDrives: true });
                     break;
 
                 case 'UPDATE_FILE':
                      state.message = `ファイル更新中: ${action.path} ${progress}`;
                      Drive.Files.remove(action.destId, { supportsAllDrives: true });
-                     const updateResource = { name: getFileName(action.path), parents: [action.destParentId] };
+                     const updateResource = { name: fileName, parents: [parentNode.id] };
                      Drive.Files.copy(updateResource, action.sourceId, { supportsAllDrives: true });
                     break;
             }
-        } catch (e) {
-             Logger.log(`Action failed: ${JSON.stringify(action)}. Error: ${e}`);
-             // Option to add error handling per action, e.g., skip and log
+            state.processedActions++;
+            setState(state);
         }
-
-        state.processedActions++;
-        setState(state);
+    } catch (e) {
+        const failedAction = state.actions[state.processedActions];
+        Logger.log(`実行エラー: アクション=${JSON.stringify(failedAction)}, エラー=${e.stack}`);
+        throw e; // mainTriggerHandlerでキャッチさせる
     }
 
     if (state.actions.length <= state.processedActions) {
@@ -301,7 +301,6 @@ function runExecutingPhase(state, startTime) {
         const elapsedTime = (Date.now() - state.startTime) / 1000;
         state.message = `同期が完了しました。(${state.totalFolders}フォルダ, ${state.totalFiles}ファイル) 経過時間: ${Math.round(elapsedTime)}秒`;
     }
-
     return state;
 }
 
@@ -331,7 +330,7 @@ function getChildren(folderId) {
 function getObjectByPath(obj, path) {
     if (path === '') return obj[''];
     return path.split('/').reduce((acc, part) => {
-        if (!acc || !acc.children) return null;
+        if (!acc || !acc.children || !acc.children[part]) return null;
         return acc.children[part];
     }, obj['']);
 }
