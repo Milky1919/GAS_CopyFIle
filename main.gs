@@ -59,26 +59,15 @@ function getDefaultState() {
 }
 
 function getState() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    const properties = PropertiesService.getScriptProperties();
-    const stateJson = properties.getProperty(STATE_KEY);
-    return stateJson ? JSON.parse(stateJson) : getDefaultState();
-  } finally {
-    lock.releaseLock();
-  }
+  const cache = CacheService.getScriptCache();
+  const stateJson = cache.get(STATE_KEY);
+  return stateJson ? JSON.parse(stateJson) : getDefaultState();
 }
 
 function setState(state) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    const stateJson = JSON.stringify(state, null, 2);
-    PropertiesService.getScriptProperties().setProperty(STATE_KEY, stateJson);
-  } finally {
-    lock.releaseLock();
-  }
+  const cache = CacheService.getScriptCache();
+  const stateJson = JSON.stringify(state, null, 2);
+  cache.put(STATE_KEY, stateJson, 21600); // 6 hours expiration
 }
 
 
