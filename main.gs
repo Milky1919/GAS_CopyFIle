@@ -77,8 +77,11 @@ function setState(state) {
  * @param {object} [overrides] - UIステータスの一部の値を上書きするためのオプションのオブジェクト。
  */
 function setUIStatus(state, overrides = {}) {
+  // PropertiesServiceのサイズ上限(9KB)を超えるのを防ぐため、メッセージを500文字に制限
+  const truncatedMessage = (state.message && state.message.length > 500) ? state.message.substring(0, 497) + '...' : state.message;
+
   const uiState = {
-    message: state.message,
+    message: truncatedMessage,
     status: state.status,
     processed: state.processedActions || 0,
     total: state.actions ? state.actions.length : 0,
