@@ -271,7 +271,14 @@ function runExecutingPhase(state, startTime) {
                 throw new Error(`親フォルダが見つかりません: ${action.path}`);
             }
 
-            state.message = `処理中: ${action.path} ${progress}`;
+            let actionText = '';
+            switch(action.type) {
+                case 'CREATE_FOLDER': actionText = 'フォルダ作成'; break;
+                case 'COPY_FILE': actionText = 'ファイルコピー'; break;
+                case 'UPDATE_FILE': actionText = 'ファイル更新'; break;
+                default: actionText = '処理中';
+            }
+            state.message = `${actionText}: ${action.path} ${progress}`;
 
             switch(action.type) {
                 case 'CREATE_FOLDER':
