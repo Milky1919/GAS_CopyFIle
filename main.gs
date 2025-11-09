@@ -4,6 +4,7 @@
 
 // 状態を保存するためのキー
 const STATE_KEY = 'SYNC_STATE';
+const UI_STATE_KEY = 'SYNC_UI_STATE'; // UIポーリング用の軽量な状態を保存するキー
 
 // 処理を再開するためのトリガーとして設定する関数名
 const TRIGGER_HANDLER_NAME = 'mainTriggerHandler';
@@ -70,6 +71,28 @@ function setState(state) {
   cache.put(STATE_KEY, stateJson, 21600); // 6 hours expiration
 }
 
+/**
+ * UIのポーリング用に、軽量なステータスオブジェクトをPropertiesServiceに書き込むヘルパー関数。
+ * @param {object} state - 現在の完全な状態オブジェクト。
+ * @param {object} [overrides] - UIステータスの一部の値を上書きするためのオプションのオブジェクト。
+ */
+function setUIStatus(state, overrides = {}) {
+  const uiState = {
+    message: state.message,
+    status: state.status,
+    processed: state.processedActions || 0,
+    total: state.actions ? state.actions.length : 0,
+    startTime: state.startTime,
+    ...overrides,
+  };
+  try {
+    PropertiesService.getScriptProperties().setProperty(UI_STATE_KEY, JSON.stringify(uiState));
+  } catch (e) {
+    Logger.log(`Failed to set UI status in PropertiesService: ${e.message}`);
+    // このエラーは処理を停止させるべきではないので、ログに記録するだけ
+  }
+}
+
 
 // =================================================
 // Functions called from HTML Dialog
@@ -80,6 +103,35 @@ function getFolderIdFromInput(input) {
   if (input.includes('folders/')) return input.split('folders/')[1].split('/')[0].split('?')[0];
   if (input.includes('id=')) return input.split('id=')[1].split('&')[0];
   return input;
+}
+
+/**
+ * UIがポーリングするための軽量なステータスをPropertiesServiceから取得する。
+ * PropertiesServiceに有効なデータがない場合は、CacheServiceの全体状態からフォールバックする。
+ */
+function getUIStatus() {
+  const uiStateJson = PropertiesService.getScriptProperties().getProperty(UI_STATE_KEY);
+  if (uiStateJson) {
+    try {
+      const uiState = JSON.parse(uiStateJson);
+      // 必須キーの存在をチェック
+      if (uiState.message !== undefined && uiState.status !== undefined) {
+        return uiState;
+      }
+    } catch (e) {
+      Logger.log(`UI State JSONのパースに失敗しました: ${e.message}. Fallback to full state.`);
+    }
+  }
+
+  // PropertiesServiceに値がない、または無効な場合のフォールバック
+  const state = getState();
+  return {
+    message: state.message,
+    status: state.status,
+    processed: state.processedActions || 0,
+    total: state.actions ? state.actions.length : 0,
+    startTime: state.startTime,
+  };
 }
 
 function getSyncStatus() { return getState(); }
@@ -115,18 +167,23 @@ function startSyncJob(folderIds) {
       destMap: { '': {id: destFolderId, name: destRoot.name, type: 'folder', children: {}} },
     };
     setState(initialState);
+    setUIStatus(initialState);
 
     ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
   } catch (e) {
     Logger.log(`Error in startSyncJob: ${e.stack}`);
-    setState({ ...getState(), status: 'ERROR', message: e.message, lastError: e.message });
+    const errorState = { ...getState(), status: 'ERROR', message: e.message, lastError: e.message };
+    setState(errorState);
+    setUIStatus(errorState);
     throw e;
   }
 }
 
 function stopSyncJob() {
   deleteTriggers();
-  setState(getDefaultState());
+  const defaultState = getDefaultState();
+  setState(defaultState);
+  setUIStatus(defaultState, {message: 'ユーザーによって停止されました。'});
   Logger.log('同期ジョブがユーザーによって停止されました。');
 }
 
@@ -162,6 +219,7 @@ function mainTriggerHandler() {
       deleteTriggers();
       state.message = "一時中断中... 次の処理を準備しています。";
       setState(state);
+      setUIStatus(state);
       ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
     } else {
       deleteTriggers();
@@ -173,6 +231,7 @@ function mainTriggerHandler() {
     state.message = `エラーが発生しました: ${e.message}`;
     state.lastError = e.stack;
     deleteTriggers();
+    setUIStatus(state);
   } finally {
     setState(state);
   }
@@ -184,7 +243,10 @@ function runPlanningPhase(state, startTime) {
         const item = state.scanQueue.shift();
         const parentMap = (item.type === 'source') ? state.sourceMap : state.destMap;
         state.message = `フォルダ情報をスキャン中: ${item.path || '/'}`;
-
+        setUIStatus(state, {
+          total: state.totalFiles + state.totalFolders,
+          processed: Object.keys(state.sourceMap).length + Object.keys(state.destMap).length - 2
+        });
         const children = getChildren(item.folderId);
         let currentPathMap = getObjectByPath(parentMap, item.path);
 
@@ -212,6 +274,7 @@ function runPlanningPhase(state, startTime) {
 
 function runGenerateActionsPhase(state) {
     state.message = "変更点を分析し、同期計画を作成しています...";
+    setUIStatus(state);
     const actions = [];
     const addActionsForNewFolder = (sourceNode, parentPath) => {
         for (const name in sourceNode.children) {
@@ -279,6 +342,7 @@ function runExecutingPhase(state, startTime) {
                 default: actionText = '処理中';
             }
             state.message = `${actionText}: ${action.path} ${progress}`;
+            setUIStatus(state);
 
             switch(action.type) {
                 case 'CREATE_FOLDER':
@@ -315,6 +379,7 @@ function runExecutingPhase(state, startTime) {
         const elapsedTime = (Date.now() - state.startTime) / 1000;
         state.message = `同期が完了しました。(${state.totalFolders}フォルダ, ${state.totalFiles}ファイル) 経過時間: ${Math.round(elapsedTime)}秒`;
         setState(state);
+        setUIStatus(state);
     }
     return state;
 }

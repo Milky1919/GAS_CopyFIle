@@ -50,8 +50,16 @@
     let timerInterval;
 
     document.addEventListener('DOMContentLoaded', () => {
-      pollStatus();
-      poller = setInterval(pollStatus, 2000); // ポーリング間隔を2秒に短縮
+      // 初期状態をまず取得して、実行中だった場合のフォルダIDを復元する
+      google.script.run
+        .withSuccessHandler(initialState => {
+          updateStatus(initialState);
+          // 初期化が完了してからポーリングを開始する
+          pollStatus();
+          poller = setInterval(pollStatus, 2000);
+        })
+        .withFailureHandler(handleFailure)
+        .getSyncStatus();
     });
 
     function startSync() {
@@ -86,7 +94,7 @@
       google.script.run
         .withSuccessHandler(updateStatus)
         .withFailureHandler(handleFailure)
-        .getSyncStatus();
+        .getUIStatus();
     }
 
     function updateStatus(state) {
@@ -99,9 +107,16 @@
         return;
       }
 
+      // getSyncStatusから呼ばれた場合（初回ロード時）のみIDを更新
       if (state.sourceFolderId) document.getElementById('sourceFolder').value = state.sourceFolderId;
       if (state.destFolderId) document.getElementById('destFolder').value = state.destFolderId;
-      statusDiv.textContent = state.message || state.status;
+
+      let message = state.message || state.status;
+      if (state.total > 0) {
+        message += ` (${state.processed}/${state.total})`;
+      }
+      statusDiv.textContent = message;
+
 
       switch(state.status) {
         case 'RUNNING':
