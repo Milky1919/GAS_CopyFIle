@@ -64,23 +64,20 @@ function getDefaultState() {
   };
 }
 
-// Helper function to load and unchunk data
-function loadAndUnchunk(cache, baseKey, numChunks, isMap) {
-  let data = isMap ? {} : [];
-  if (numChunks) {
-    for (let i = 0; i < numChunks; i++) {
-      const chunkJson = cache.get(`${baseKey}_${i}`);
-      if (chunkJson) {
-        const chunk = JSON.parse(chunkJson);
-        if (isMap) {
-          Object.assign(data, chunk);
-        } else {
-          data = data.concat(chunk);
-        }
-      }
+// Helper function to load string chunks from cache and reconstruct the object
+function loadAndUnchunk(cache, baseKey, numChunks) {
+  if (!numChunks) return null;
+
+  let jsonString = '';
+  for (let i = 0; i < numChunks; i++) {
+    const chunk = cache.get(`${baseKey}_${i}`);
+    if (chunk) {
+      jsonString += chunk;
     }
   }
-  return data;
+
+  if (jsonString === '') return null;
+  return JSON.parse(jsonString);
 }
 
 function getState() {
@@ -93,10 +90,10 @@ function getState() {
 
   const mainState = JSON.parse(mainStateJson);
 
-  const sourceMap = loadAndUnchunk(cache, STATE_SOURCE_MAP_KEY, mainState.sourceMapChunks, true);
-  const destMap = loadAndUnchunk(cache, STATE_DEST_MAP_KEY, mainState.destMapChunks, true);
-  const scanQueue = loadAndUnchunk(cache, STATE_SCAN_QUEUE_KEY, mainState.scanQueueChunks, false);
-  const actions = loadAndUnchunk(cache, STATE_ACTIONS_KEY, mainState.actionChunks, false);
+  const sourceMap = loadAndUnchunk(cache, STATE_SOURCE_MAP_KEY, mainState.sourceMapChunks) || {};
+  const destMap = loadAndUnchunk(cache, STATE_DEST_MAP_KEY, mainState.destMapChunks) || {};
+  const scanQueue = loadAndUnchunk(cache, STATE_SCAN_QUEUE_KEY, mainState.scanQueueChunks) || [];
+  const actions = loadAndUnchunk(cache, STATE_ACTIONS_KEY, mainState.actionChunks) || [];
 
   return {
     ...mainState,
@@ -107,37 +104,24 @@ function getState() {
   };
 }
 
-// Helper function to chunk and save data based on its JSON string size
+// Helper function to chunk a string and save the chunks to cache
 function chunkAndSave(cache, baseKey, data) {
-  const MAX_CHUNK_SIZE_BYTES = 80 * 1024; // 80KB to be safe
-  let chunks = [];
-  let currentChunk = [];
-  let currentChunkSize = 2; // for '[]'
-
-  const entries = Array.isArray(data) ? data : Object.entries(data);
-
-  for (const item of entries) {
-    const itemJson = JSON.stringify(item);
-    const itemSize = new Blob([itemJson]).size;
-
-    if (currentChunkSize + itemSize > MAX_CHUNK_SIZE_BYTES && currentChunk.length > 0) {
-      chunks.push(currentChunk);
-      currentChunk = [];
-      currentChunkSize = 2;
-    }
-    currentChunk.push(item);
-    currentChunkSize += itemSize + 1; // +1 for comma
-  }
-  if (currentChunk.length > 0) {
-    chunks.push(currentChunk);
+  if (!data || (Array.isArray(data) && data.length === 0) || (typeof data === 'object' && Object.keys(data).length === 0 && data.constructor === Object)) {
+    return 0;
   }
 
-  chunks.forEach((chunk, index) => {
-    const dataToStore = Array.isArray(data) ? chunk : Object.fromEntries(chunk);
-    cache.put(`${baseKey}_${index}`, JSON.stringify(dataToStore), 21600);
-  });
+  const jsonString = JSON.stringify(data);
+  const totalLength = jsonString.length;
+  const MAX_CHUNK_LENGTH = 80000; // 80k characters as a safe chunk size
+  let chunkIndex = 0;
 
-  return chunks.length;
+  for (let i = 0; i < totalLength; i += MAX_CHUNK_LENGTH) {
+    const chunk = jsonString.substring(i, i + MAX_CHUNK_LENGTH);
+    cache.put(`${baseKey}_${chunkIndex}`, chunk, 21600);
+    chunkIndex++;
+  }
+
+  return chunkIndex;
 }
 
 function setState(state) {
