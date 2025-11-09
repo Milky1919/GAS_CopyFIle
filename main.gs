@@ -64,6 +64,25 @@ function getDefaultState() {
   };
 }
 
+// Helper function to load and unchunk data
+function loadAndUnchunk(cache, baseKey, numChunks, isMap) {
+  let data = isMap ? {} : [];
+  if (numChunks) {
+    for (let i = 0; i < numChunks; i++) {
+      const chunkJson = cache.get(`${baseKey}_${i}`);
+      if (chunkJson) {
+        const chunk = JSON.parse(chunkJson);
+        if (isMap) {
+          Object.assign(data, chunk);
+        } else {
+          data = data.concat(chunk);
+        }
+      }
+    }
+  }
+  return data;
+}
+
 function getState() {
   const cache = CacheService.getScriptCache();
 
@@ -74,63 +93,64 @@ function getState() {
 
   const mainState = JSON.parse(mainStateJson);
 
-  const sourceMapJson = cache.get(STATE_SOURCE_MAP_KEY);
-  const destMapJson = cache.get(STATE_DEST_MAP_KEY);
-  const scanQueueJson = cache.get(STATE_SCAN_QUEUE_KEY);
-
-  let actions = [];
-  if (mainState.actionChunks) {
-    for (let i = 0; i < mainState.actionChunks; i++) {
-      const chunkJson = cache.get(`${STATE_ACTIONS_KEY}_${i}`);
-      if(chunkJson) {
-        actions = actions.concat(JSON.parse(chunkJson));
-      }
-    }
-  }
+  const sourceMap = loadAndUnchunk(cache, STATE_SOURCE_MAP_KEY, mainState.sourceMapChunks, true);
+  const destMap = loadAndUnchunk(cache, STATE_DEST_MAP_KEY, mainState.destMapChunks, true);
+  const scanQueue = loadAndUnchunk(cache, STATE_SCAN_QUEUE_KEY, mainState.scanQueueChunks, false);
+  const actions = loadAndUnchunk(cache, STATE_ACTIONS_KEY, mainState.actionChunks, false);
 
   return {
     ...mainState,
-    sourceMap: sourceMapJson ? JSON.parse(sourceMapJson) : {},
-    destMap: destMapJson ? JSON.parse(destMapJson) : {},
-    scanQueue: scanQueueJson ? JSON.parse(scanQueueJson) : [],
+    sourceMap: sourceMap,
+    destMap: destMap,
+    scanQueue: scanQueue,
     actions: actions,
   };
+}
+
+// Helper function to chunk and save data based on its JSON string size
+function chunkAndSave(cache, baseKey, data) {
+  const MAX_CHUNK_SIZE_BYTES = 80 * 1024; // 80KB to be safe
+  let chunks = [];
+  let currentChunk = [];
+  let currentChunkSize = 2; // for '[]'
+
+  const entries = Array.isArray(data) ? data : Object.entries(data);
+
+  for (const item of entries) {
+    const itemJson = JSON.stringify(item);
+    const itemSize = new Blob([itemJson]).size;
+
+    if (currentChunkSize + itemSize > MAX_CHUNK_SIZE_BYTES && currentChunk.length > 0) {
+      chunks.push(currentChunk);
+      currentChunk = [];
+      currentChunkSize = 2;
+    }
+    currentChunk.push(item);
+    currentChunkSize += itemSize + 1; // +1 for comma
+  }
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  chunks.forEach((chunk, index) => {
+    const dataToStore = Array.isArray(data) ? chunk : Object.fromEntries(chunk);
+    cache.put(`${baseKey}_${index}`, JSON.stringify(dataToStore), 21600);
+  });
+
+  return chunks.length;
 }
 
 function setState(state) {
   const cache = CacheService.getScriptCache();
 
-  // Destructure the state to separate large objects
   const { sourceMap, destMap, actions, scanQueue, ...mainState } = state;
 
-  // Store the main lightweight state
-  cache.put(STATE_KEY, JSON.stringify(mainState, null, 2), 21600);
+  mainState.sourceMapChunks = chunkAndSave(cache, STATE_SOURCE_MAP_KEY, sourceMap || {});
+  mainState.destMapChunks = chunkAndSave(cache, STATE_DEST_MAP_KEY, destMap || {});
+  mainState.scanQueueChunks = chunkAndSave(cache, STATE_SCAN_QUEUE_KEY, scanQueue || []);
+  mainState.actionChunks = chunkAndSave(cache, STATE_ACTIONS_KEY, actions || []);
 
-  // Store the large objects separately
-  if (sourceMap) {
-    cache.put(STATE_SOURCE_MAP_KEY, JSON.stringify(sourceMap), 21600);
-  }
-  if (destMap) {
-    cache.put(STATE_DEST_MAP_KEY, JSON.stringify(destMap), 21600);
-  }
-  if (scanQueue) {
-    cache.put(STATE_SCAN_QUEUE_KEY, JSON.stringify(scanQueue), 21600);
-  }
-  if (actions) {
-    // Chunking the actions array
-    const CHUNK_SIZE = 5000; // Adjust chunk size as needed
-    let i = 0;
-    let chunkIndex = 0;
-    while(i < actions.length) {
-      const chunk = actions.slice(i, i + CHUNK_SIZE);
-      cache.put(`${STATE_ACTIONS_KEY}_${chunkIndex}`, JSON.stringify(chunk), 21600);
-      i += CHUNK_SIZE;
-      chunkIndex++;
-    }
-    // Store the number of chunks
-    mainState.actionChunks = chunkIndex;
-    cache.put(STATE_KEY, JSON.stringify(mainState, null, 2), 21600);
-  }
+  cache.put(STATE_KEY, JSON.stringify(mainState, null, 2), 21600);
 }
 
 /**
@@ -242,8 +262,8 @@ function startSyncJob(folderIds) {
         { type: 'source', folderId: sourceFolderId, path: '' },
         { type: 'dest', folderId: destFolderId, path: '' },
       ],
-      sourceMap: { '': {id: sourceFolderId, name: sourceRoot.name, type: 'folder', children: {}} },
-      destMap: { '': {id: destFolderId, name: destRoot.name, type: 'folder', children: {}} },
+      sourceMap: { '': {id: sourceFolderId, name: sourceRoot.name, type: 'folder'} },
+      destMap: { '': {id: destFolderId, name: destRoot.name, type: 'folder'} },
     };
     setState(initialState);
     setUIStatus({
@@ -355,7 +375,7 @@ function runPlanningPhase(state, startTime) {
     while (state.scanQueue.length > 0 && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
         const item = state.scanQueue.shift();
         const parentMap = (item.type === 'source') ? state.sourceMap : state.destMap;
-        state.message = `フォルダ情報をスキャン中: ${item.path || '/'}`;
+        state.message = `フォルダ情報をスキャン中: ${truncatePathForUI(item.path) || '/'}`;
         setUIStatus({
           message: state.message,
           status: state.status,
@@ -364,12 +384,11 @@ function runPlanningPhase(state, startTime) {
           startTime: state.startTime,
         });
         const children = getChildren(item.folderId);
-        let currentPathMap = getObjectByPath(parentMap, item.path);
 
         for (const child of children) {
             const childPath = item.path ? `${item.path}/${child.name}` : child.name;
             const isFolder = child.mimeType === 'application/vnd.google-apps.folder';
-            currentPathMap.children[child.name] = { id: child.id, type: isFolder ? 'folder' : 'file', modifiedTime: child.modifiedTime, children: isFolder ? {} : undefined };
+            parentMap[childPath] = { id: child.id, type: isFolder ? 'folder' : 'file', modifiedTime: child.modifiedTime };
             if (isFolder) {
                 state.scanQueue.push({ type: item.type, folderId: child.id, path: childPath });
                 if (item.type === 'source') state.totalFolders++;
@@ -393,53 +412,44 @@ function runGenerateActionsPhase(state) {
     setUIStatus({
       message: state.message,
       status: state.status,
-      processed: state.processedActions,
-      total: state.actions.length,
+      processed: 0,
+      total: 0,
       startTime: state.startTime,
     });
+
     const actions = [];
-    const addActionsForNewFolder = (sourceNode, parentPath) => {
-        for (const name in sourceNode.children) {
-            const child = sourceNode.children[name];
-            const currentPath = parentPath ? `${parentPath}/${name}` : name;
-            if (child.type === 'folder') {
-                actions.push({ type: 'CREATE_FOLDER', path: currentPath });
-                addActionsForNewFolder(child, currentPath);
+    const sortedSourcePaths = Object.keys(state.sourceMap).sort();
+
+    for (const path of sortedSourcePaths) {
+        if (path === '') continue; // Skip root
+
+        const sourceNode = state.sourceMap[path];
+        const destNode = state.destMap[path];
+
+        if (!destNode) {
+            // Destination doesn't exist, create it
+            if (sourceNode.type === 'folder') {
+                actions.push({ type: 'CREATE_FOLDER', path: path });
             } else {
-                actions.push({ type: 'COPY_FILE', path: currentPath, sourceId: child.id });
+                actions.push({ type: 'COPY_FILE', path: path, sourceId: sourceNode.id });
             }
-        }
-    };
-    const compareFolders = (sourceNode, destNode, path) => {
-        for (const name in sourceNode.children) {
-            const sourceChild = sourceNode.children[name];
-            const destChild = destNode.children[name];
-            const currentPath = path ? `${path}/${name}` : name;
-            if (!destChild) {
-                if (sourceChild.type === 'folder') {
-                    actions.push({ type: 'CREATE_FOLDER', path: currentPath });
-                    addActionsForNewFolder(sourceChild, currentPath);
-                } else {
-                    actions.push({ type: 'COPY_FILE', path: currentPath, sourceId: sourceChild.id });
-                }
-            } else {
-                 if (sourceChild.type === 'file' && destChild.type === 'file') {
-                    const sourceModified = new Date(sourceChild.modifiedTime).getTime();
-                    const destModified = new Date(destChild.modifiedTime).getTime();
-                    if (sourceModified > destModified) {
-                        actions.push({ type: 'UPDATE_FILE', path: currentPath, sourceId: sourceChild.id, destId: destChild.id });
-                    }
-                } else if (sourceChild.type === 'folder' && destChild.type === 'folder') {
-                    compareFolders(sourceChild, destChild, currentPath);
+        } else {
+            // Destination exists, check for updates
+            if (sourceNode.type === 'file' && destNode.type === 'file') {
+                const sourceModified = new Date(sourceNode.modifiedTime).getTime();
+                const destModified = new Date(destNode.modifiedTime).getTime();
+                if (sourceModified > destModified) {
+                    actions.push({ type: 'UPDATE_FILE', path: path, sourceId: sourceNode.id, destId: destNode.id });
                 }
             }
         }
-    };
-    compareFolders(state.sourceMap[''], state.destMap[''], '');
+    }
+
     state.actions = actions;
     state.phase = 'EXECUTING';
     return state;
 }
+
 
 function runExecutingPhase(state, startTime) {
     let lastSaveTime = Date.now();
@@ -450,7 +460,7 @@ function runExecutingPhase(state, startTime) {
 
             const parentPath = getParentPath(action.path);
             const fileName = getFileName(action.path);
-            const parentNode = getObjectByPath(state.destMap, parentPath);
+            const parentNode = state.destMap[parentPath];
 
             if (!parentNode) {
                 throw new Error(`親フォルダが見つかりません: ${action.path}`);
@@ -463,7 +473,7 @@ function runExecutingPhase(state, startTime) {
                 case 'UPDATE_FILE': actionText = 'ファイル更新'; break;
                 default: actionText = '処理中';
             }
-            state.message = `${actionText}: ${action.path} ${progress}`;
+            state.message = `${actionText}: ${truncatePathForUI(action.path)} ${progress}`;
             setUIStatus({
               message: state.message,
               status: state.status,
@@ -476,7 +486,7 @@ function runExecutingPhase(state, startTime) {
                 case 'CREATE_FOLDER':
                     const newFolder = { name: fileName, parents: [parentNode.id], mimeType: 'application/vnd.google-apps.folder' };
                     const createdFolder = Drive.Files.create(newFolder, null, { supportsAllDrives: true, fields: 'id' });
-                    parentNode.children[fileName] = { id: createdFolder.id, type: 'folder', children: {} };
+                    state.destMap[action.path] = { id: createdFolder.id, type: 'folder' };
                     break;
 
                 case 'COPY_FILE':
@@ -522,6 +532,16 @@ function runExecutingPhase(state, startTime) {
 // Helper Functions
 // =================================================
 
+function truncatePathForUI(path, maxLength = 80) {
+    if (!path || path.length <= maxLength) return path;
+    const fileName = getFileName(path);
+    if (fileName.length >= maxLength - 4) {
+        return '...' + fileName.slice(-maxLength + 4);
+    }
+    const parentPath = getParentPath(path);
+    return parentPath.substring(0, maxLength - fileName.length - 4) + '.../' + fileName;
+}
+
 function getChildren(folderId) {
   const children = [];
   let pageToken = null;
@@ -539,14 +559,6 @@ function getChildren(folderId) {
     pageToken = response.nextPageToken;
   } while (pageToken);
   return children;
-}
-
-function getObjectByPath(obj, path) {
-    if (path === '') return obj[''];
-    return path.split('/').reduce((acc, part) => {
-        if (!acc || !acc.children || !acc.children[part]) return null;
-        return acc.children[part];
-    }, obj['']);
 }
 
 function getParentPath(path) {
