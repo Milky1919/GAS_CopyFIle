@@ -10,6 +10,7 @@
     input[type="text"] { width: 100%; box-sizing: border-box; }
     .button-bar { margin-top: 20px; display: flex; justify-content: space-between; }
     #status-container { margin-top: 20px; padding: 10px; border: 1px solid #ccc; background-color: #f9f9f9; min-height: 50px; }
+    #timer { float: right; color: #666; font-size: 0.9em; }
     .running { color: #0072c6; }
     .done { color: #107c10; }
     .error { color: #d83b01; font-weight: bold; }
@@ -39,51 +40,48 @@
   </div>
 
   <div id="status-container">
+    <div id="timer">経過時間: 0秒</div>
     <h4>現在のステータス</h4>
     <div id="status" class="idle">待機中</div>
   </div>
 
   <script>
-    let poller; // setIntervalのIDを保持
+    let poller;
+    let timerInterval;
 
-    // ダイアログが開かれたときに現在の状態をサーバーに問い合わせる
     document.addEventListener('DOMContentLoaded', () => {
       pollStatus();
-      // 5秒ごとにステータスを自動更新
-      poller = setInterval(pollStatus, 5000);
+      poller = setInterval(pollStatus, 2000); // ポーリング間隔を2秒に短縮
     });
 
-    // 同期開始ボタンが押されたときの処理
     function startSync() {
       const sourceFolder = document.getElementById('sourceFolder').value;
       const destFolder = document.getElementById('destFolder').value;
-
       if (!sourceFolder || !destFolder) {
         updateStatus({ status: 'ERROR', message: 'コピー元と同期先の両方を入力してください。' });
         return;
       }
-
-      setControlsState(true); // コントロールを無効化
+      setControlsState(true);
       updateStatus({ status: 'RUNNING', message: '同期ジョブを開始しています...' });
-
       const folderIds = { sourceFolder, destFolder };
       google.script.run
-        .withSuccessHandler(() => pollStatus()) // 成功したらポーリングを開始
+        .withSuccessHandler(() => pollStatus())
         .withFailureHandler(handleFailure)
         .startSyncJob(folderIds);
     }
 
-    // 強制停止ボタンが押されたときの処理
     function stopSync() {
       setControlsState(true);
       updateStatus({ status: 'IDLE', message: 'ジョブを停止しています...' });
       google.script.run
-        .withSuccessHandler(() => pollStatus())
+        .withSuccessHandler(() => {
+          pollStatus();
+          stopTimer();
+        })
         .withFailureHandler(handleFailure)
         .stopSyncJob();
     }
 
-    // サーバーに現在の状態を問い合わせる
     function pollStatus() {
       google.script.run
         .withSuccessHandler(updateStatus)
@@ -91,61 +89,82 @@
         .getSyncStatus();
     }
 
-    // 受け取ったステータスオブジェクトでUIを更新する
     function updateStatus(state) {
       const statusDiv = document.getElementById('status');
-      const sourceFolderInput = document.getElementById('sourceFolder');
-      const destFolderInput = document.getElementById('destFolder');
-
       if (!state) {
         statusDiv.className = 'error';
         statusDiv.textContent = 'ステータスを取得できませんでした。';
         setControlsState(false);
+        stopTimer();
         return;
       }
 
-      // 入力欄にIDを反映（実行中の場合）
-      if (state.sourceFolderId) sourceFolderInput.value = state.sourceFolderId;
-      if (state.destFolderId) destFolderInput.value = state.destFolderId;
-
+      if (state.sourceFolderId) document.getElementById('sourceFolder').value = state.sourceFolderId;
+      if (state.destFolderId) document.getElementById('destFolder').value = state.destFolderId;
       statusDiv.textContent = state.message || state.status;
 
       switch(state.status) {
         case 'RUNNING':
           statusDiv.className = 'running';
           setControlsState(true);
+          startTimer(state.startTime);
           break;
         case 'DONE':
           statusDiv.className = 'done';
           setControlsState(false);
-          clearInterval(poller); // 完了したらポーリングを停止
+          stopTimer(state.startTime);
+          clearInterval(poller);
           break;
         case 'ERROR':
           statusDiv.className = 'error';
           setControlsState(false);
+          stopTimer();
           clearInterval(poller);
           break;
         case 'IDLE':
         default:
           statusDiv.className = 'idle';
           setControlsState(false);
+          stopTimer();
           break;
       }
     }
 
-    // 予期せぬエラーが発生した場合の処理
     function handleFailure(error) {
       updateStatus({ status: 'ERROR', message: error.message });
       clearInterval(poller);
+      stopTimer();
     }
 
-    // ボタンや入力欄の有効/無効を切り替える
     function setControlsState(syncing) {
       document.getElementById('startButton').disabled = syncing;
       document.getElementById('sourceFolder').disabled = syncing;
       document.getElementById('destFolder').disabled = syncing;
-      // 停止ボタンは常に有効にしておく（いつでも停止できるように）
-      // document.getElementById('stopButton').disabled = !syncing;
+    }
+
+    function startTimer(startTime) {
+      if (timerInterval || !startTime) return;
+      const timerDiv = document.getElementById('timer');
+      timerInterval = setInterval(() => {
+        const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+        const minutes = Math.floor(elapsedSeconds / 60);
+        const seconds = elapsedSeconds % 60;
+        timerDiv.textContent = `経過時間: ${minutes}分 ${seconds}秒`;
+      }, 1000);
+    }
+
+    function stopTimer(startTime) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+      const timerDiv = document.getElementById('timer');
+      if (startTime) {
+          const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+          const minutes = Math.floor(elapsedSeconds / 60);
+          const seconds = elapsedSeconds % 60;
+          timerDiv.textContent = `経過時間: ${minutes}分 ${seconds}秒`;
+      } else {
+          timerDiv.textContent = "経過時間: 0秒";
+      }
     }
   </script>
 </body>
