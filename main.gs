@@ -314,6 +314,7 @@ function runExecutingPhase(state, startTime) {
         state.status = 'DONE';
         const elapsedTime = (Date.now() - state.startTime) / 1000;
         state.message = `同期が完了しました。(${state.totalFolders}フォルダ, ${state.totalFiles}ファイル) 経過時間: ${Math.round(elapsedTime)}秒`;
+        setState(state);
     }
     return state;
 }
