@@ -59,14 +59,26 @@ function getDefaultState() {
 }
 
 function getState() {
-  const properties = PropertiesService.getScriptProperties();
-  const stateJson = properties.getProperty(STATE_KEY);
-  return stateJson ? JSON.parse(stateJson) : getDefaultState();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const stateJson = properties.getProperty(STATE_KEY);
+    return stateJson ? JSON.parse(stateJson) : getDefaultState();
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function setState(state) {
-  const stateJson = JSON.stringify(state, null, 2);
-  PropertiesService.getScriptProperties().setProperty(STATE_KEY, stateJson);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const stateJson = JSON.stringify(state, null, 2);
+    PropertiesService.getScriptProperties().setProperty(STATE_KEY, stateJson);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 
