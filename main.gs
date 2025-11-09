@@ -8,6 +8,7 @@ const UI_STATE_KEY = 'SYNC_UI_STATE'; // UIポーリング用の軽量な状態�
 const STATE_SOURCE_MAP_KEY = 'SYNC_STATE_SOURCE_MAP';
 const STATE_DEST_MAP_KEY = 'SYNC_STATE_DEST_MAP';
 const STATE_ACTIONS_KEY = 'SYNC_STATE_ACTIONS';
+const STATE_SCAN_QUEUE_KEY = 'SYNC_STATE_SCAN_QUEUE';
 
 
 // 処理を再開するためのトリガーとして設定する関数名
@@ -75,6 +76,7 @@ function getState() {
 
   const sourceMapJson = cache.get(STATE_SOURCE_MAP_KEY);
   const destMapJson = cache.get(STATE_DEST_MAP_KEY);
+  const scanQueueJson = cache.get(STATE_SCAN_QUEUE_KEY);
 
   let actions = [];
   if (mainState.actionChunks) {
@@ -90,6 +92,7 @@ function getState() {
     ...mainState,
     sourceMap: sourceMapJson ? JSON.parse(sourceMapJson) : {},
     destMap: destMapJson ? JSON.parse(destMapJson) : {},
+    scanQueue: scanQueueJson ? JSON.parse(scanQueueJson) : [],
     actions: actions,
   };
 }
@@ -98,7 +101,7 @@ function setState(state) {
   const cache = CacheService.getScriptCache();
 
   // Destructure the state to separate large objects
-  const { sourceMap, destMap, actions, ...mainState } = state;
+  const { sourceMap, destMap, actions, scanQueue, ...mainState } = state;
 
   // Store the main lightweight state
   cache.put(STATE_KEY, JSON.stringify(mainState, null, 2), 21600);
@@ -109,6 +112,9 @@ function setState(state) {
   }
   if (destMap) {
     cache.put(STATE_DEST_MAP_KEY, JSON.stringify(destMap), 21600);
+  }
+  if (scanQueue) {
+    cache.put(STATE_SCAN_QUEUE_KEY, JSON.stringify(scanQueue), 21600);
   }
   if (actions) {
     // Chunking the actions array
