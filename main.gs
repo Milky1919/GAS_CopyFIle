@@ -5,6 +5,10 @@
 // 状態を保存するためのキー
 const STATE_KEY = 'SYNC_STATE';
 const UI_STATE_KEY = 'SYNC_UI_STATE'; // UIポーリング用の軽量な状態を保存するキー
+const STATE_SOURCE_MAP_KEY = 'SYNC_STATE_SOURCE_MAP';
+const STATE_DEST_MAP_KEY = 'SYNC_STATE_DEST_MAP';
+const STATE_ACTIONS_KEY = 'SYNC_STATE_ACTIONS';
+
 
 // 処理を再開するためのトリガーとして設定する関数名
 const TRIGGER_HANDLER_NAME = 'mainTriggerHandler';
@@ -61,14 +65,66 @@ function getDefaultState() {
 
 function getState() {
   const cache = CacheService.getScriptCache();
-  const stateJson = cache.get(STATE_KEY);
-  return stateJson ? JSON.parse(stateJson) : getDefaultState();
+
+  const mainStateJson = cache.get(STATE_KEY);
+  if (!mainStateJson) {
+    return getDefaultState();
+  }
+
+  const mainState = JSON.parse(mainStateJson);
+
+  const sourceMapJson = cache.get(STATE_SOURCE_MAP_KEY);
+  const destMapJson = cache.get(STATE_DEST_MAP_KEY);
+
+  let actions = [];
+  if (mainState.actionChunks) {
+    for (let i = 0; i < mainState.actionChunks; i++) {
+      const chunkJson = cache.get(`${STATE_ACTIONS_KEY}_${i}`);
+      if(chunkJson) {
+        actions = actions.concat(JSON.parse(chunkJson));
+      }
+    }
+  }
+
+  return {
+    ...mainState,
+    sourceMap: sourceMapJson ? JSON.parse(sourceMapJson) : {},
+    destMap: destMapJson ? JSON.parse(destMapJson) : {},
+    actions: actions,
+  };
 }
 
 function setState(state) {
   const cache = CacheService.getScriptCache();
-  const stateJson = JSON.stringify(state, null, 2);
-  cache.put(STATE_KEY, stateJson, 21600); // 6 hours expiration
+
+  // Destructure the state to separate large objects
+  const { sourceMap, destMap, actions, ...mainState } = state;
+
+  // Store the main lightweight state
+  cache.put(STATE_KEY, JSON.stringify(mainState, null, 2), 21600);
+
+  // Store the large objects separately
+  if (sourceMap) {
+    cache.put(STATE_SOURCE_MAP_KEY, JSON.stringify(sourceMap), 21600);
+  }
+  if (destMap) {
+    cache.put(STATE_DEST_MAP_KEY, JSON.stringify(destMap), 21600);
+  }
+  if (actions) {
+    // Chunking the actions array
+    const CHUNK_SIZE = 5000; // Adjust chunk size as needed
+    let i = 0;
+    let chunkIndex = 0;
+    while(i < actions.length) {
+      const chunk = actions.slice(i, i + CHUNK_SIZE);
+      cache.put(`${STATE_ACTIONS_KEY}_${chunkIndex}`, JSON.stringify(chunk), 21600);
+      i += CHUNK_SIZE;
+      chunkIndex++;
+    }
+    // Store the number of chunks
+    mainState.actionChunks = chunkIndex;
+    cache.put(STATE_KEY, JSON.stringify(mainState, null, 2), 21600);
+  }
 }
 
 /**
@@ -195,11 +251,13 @@ function startSyncJob(folderIds) {
     ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
   } catch (e) {
     Logger.log(`Error in startSyncJob: ${e.stack}`);
-    const errorState = { ...getState(), status: 'ERROR', message: e.message, lastError: e.message };
+    const errorMessage = (e.message && e.message.substring(0, 500)) || 'An unknown error occurred.';
+    const errorStack = (e.stack && e.stack.substring(0, 2000)) || '';
+    const errorState = { ...getState(), status: 'ERROR', message: errorMessage, lastError: errorStack };
     setState(errorState);
     setUIStatus({
-      message: errorState.message,
-      status: errorState.status,
+      message: errorMessage,
+      status: 'ERROR',
       processed: 0,
       total: 0,
       startTime: errorState.startTime,
@@ -268,15 +326,17 @@ function mainTriggerHandler() {
 
   } catch (e) {
     Logger.log(`ERROR in mainTriggerHandler: ${e.stack}`);
+    const errorMessage = `エラーが発生しました: ${(e.message && e.message.substring(0, 500)) || '不明なエラー'}`;
+    const errorStack = (e.stack && e.stack.substring(0, 2000)) || '';
     state.status = 'ERROR';
-    state.message = `エラーが発生しました: ${e.message}`;
-    state.lastError = e.stack;
+    state.message = errorMessage;
+    state.lastError = errorStack;
     deleteTriggers();
     setUIStatus({
-        message: state.message,
-        status: state.status,
-        processed: state.processedActions,
-        total: state.actions.length,
+        message: errorMessage,
+        status: 'ERROR',
+        processed: state.processedActions || 0,
+        total: state.actions ? state.actions.length : 0,
         startTime: state.startTime,
       });
   } finally {
