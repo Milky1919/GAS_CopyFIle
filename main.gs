@@ -160,6 +160,7 @@ function mainTriggerHandler() {
     if (state.status === 'RUNNING') {
       deleteTriggers();
       state.message = "一時中断中... 次の処理を準備しています。";
+      setState(state);
       ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
     } else {
       deleteTriggers();
@@ -177,6 +178,7 @@ function mainTriggerHandler() {
 }
 
 function runPlanningPhase(state, startTime) {
+    let lastSaveTime = Date.now();
     while (state.scanQueue.length > 0 && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
         const item = state.scanQueue.shift();
         const parentMap = (item.type === 'source') ? state.sourceMap : state.destMap;
@@ -195,6 +197,10 @@ function runPlanningPhase(state, startTime) {
             } else {
                 if (item.type === 'source') state.totalFiles++;
             }
+        }
+        if (Date.now() - lastSaveTime > 2000) {
+          setState(state);
+          lastSaveTime = Date.now();
         }
     }
     if (state.scanQueue.length === 0) {
@@ -250,6 +256,7 @@ function runGenerateActionsPhase(state) {
 }
 
 function runExecutingPhase(state, startTime) {
+    let lastSaveTime = Date.now();
     try {
         while (state.actions.length > state.processedActions && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
             const action = state.actions[state.processedActions];
@@ -284,6 +291,10 @@ function runExecutingPhase(state, startTime) {
                     break;
             }
             state.processedActions++;
+            if (Date.now() - lastSaveTime > 2000) {
+              setState(state);
+              lastSaveTime = Date.now();
+            }
         }
     } catch (e) {
         const failedAction = state.actions[state.processedActions];
