@@ -99,7 +99,7 @@
 
     function updateStatus(state) {
       const statusDiv = document.getElementById('status');
-      if (!state) {
+      if (!state || !state.status) { // Check for a valid status
         statusDiv.className = 'error';
         statusDiv.textContent = 'ステータスを取得できませんでした。';
         setControlsState(false);
@@ -111,9 +111,12 @@
       if (state.sourceFolderId) document.getElementById('sourceFolder').value = state.sourceFolderId;
       if (state.destFolderId) document.getElementById('destFolder').value = state.destFolderId;
 
-      let message = state.message || state.status;
-      if (state.total > 0) {
-        message += ` (${state.processed}/${state.total})`;
+      let message = state.message || state.status || '待機中...';
+      const processed = state.processed || 0;
+      const total = state.total || 0;
+
+      if (total > 0) {
+        message += ` (${processed}/${total})`;
       }
       statusDiv.textContent = message;
 

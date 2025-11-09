@@ -5,6 +5,7 @@
 // 状態を保存するためのキー
 const STATE_KEY = 'SYNC_STATE';
 const UI_STATE_KEY = 'SYNC_UI_STATE'; // UIポーリング用の軽量な状態を保存するキー
+const UI_MESSAGE_KEY = 'SYNC_UI_MESSAGE'; // UI用の長いメッセージを保存するキー
 
 // 処理を再開するためのトリガーとして設定する関数名
 const TRIGGER_HANDLER_NAME = 'mainTriggerHandler';
@@ -72,31 +73,32 @@ function setState(state) {
 }
 
 /**
- * UIのポーリング用に、軽量なステータスオブジェクトをPropertiesServiceに書き込むヘルパー関数。
+ * UIのポーリング用に、ハイブリッドストレージモデルを使用してステータスを書き込む。
+ * - メッセージ（長い可能性のある文字列）はCacheServiceに保存する。
+ * - それ以外の軽量なデータ（ステータス、進捗）はPropertiesServiceに保存する。
+ * これにより、PropertiesServiceのサイズ制限を回避しつつ、ステータスの即時一貫性を担保する。
  * @param {object} uiState - UIに表示するための軽量な状態オブジェクト。
  *                           {message: string, status: string, processed: number, total: number, startTime: number}
  */
 function setUIStatus(uiState) {
-  // PropertiesServiceのサイズ上限(9KB)を超えるのを防ぐため、メッセージを500文字に制限
-  const truncatedMessage = (uiState.message && uiState.message.length > 500) ? uiState.message.substring(0, 497) + '...' : uiState.message;
-  const finalUIState = { ...uiState, message: truncatedMessage };
-
   try {
-    PropertiesService.getScriptProperties().setProperty(UI_STATE_KEY, JSON.stringify(finalUIState));
+    const { message, ...reliableState } = uiState;
+
+    // 信頼性が要求されるデータ（ステータス、進捗）をPropertiesServiceに書き込む
+    PropertiesService.getScriptProperties().setProperty(UI_STATE_KEY, JSON.stringify(reliableState));
+
+    // 長いメッセージをCacheServiceに書き込む（有効期限6時間）
+    CacheService.getScriptCache().put(UI_MESSAGE_KEY, message, 21600);
+
   } catch (e) {
-    Logger.log(`Failed to set UI status in PropertiesService: ${e.message}`);
-    // もしエラーがサイズ制限によるものなら、汎用的なエラーメッセージでUIステータスを更新する
-    if (e.message.includes('Argument too large')) {
-      try {
-        const minimalErrorState = {
-          ...finalUIState,
-          message: 'エラーが発生しました。メッセージが長すぎて表示できません。詳細はログを確認してください。',
-          status: 'ERROR',
-        };
-        PropertiesService.getScriptProperties().setProperty(UI_STATE_KEY, JSON.stringify(minimalErrorState));
-      } catch (e2) {
-        Logger.log(`Failed to set the fallback UI error status: ${e2.message}`);
-      }
+    // このエラーは致命的であるため、ログに記録し、可能であればUIにもエラー状態を伝える
+    Logger.log(`Failed to set hybrid UI status: ${e.message}`);
+    try {
+        const errorState = { status: 'ERROR', processed: 0, total: 0, startTime: uiState.startTime };
+        PropertiesService.getScriptProperties().setProperty(UI_STATE_KEY, JSON.stringify(errorState));
+        CacheService.getScriptCache().put(UI_MESSAGE_KEY, 'UIステータスの設定中に致命的なエラーが発生しました。', 21600);
+    } catch (e2) {
+        Logger.log(`Failed to set fallback hybrid UI status: ${e2.message}`);
     }
   }
 }
@@ -114,32 +116,41 @@ function getFolderIdFromInput(input) {
 }
 
 /**
- * UIがポーリングするための軽量なステータスをPropertiesServiceから取得する。
- * PropertiesServiceに有効なデータがない場合は、CacheServiceの全体状態からフォールバックする。
+ * UIがポーリングするために、ハイブリッドストレージからステータスを読み出して結合する。
+ * - PropertiesServiceから信頼性の高いデータを取得する。
+ * - CacheServiceからメッセージを取得する。
  */
 function getUIStatus() {
-  const uiStateJson = PropertiesService.getScriptProperties().getProperty(UI_STATE_KEY);
-  if (uiStateJson) {
-    try {
-      const uiState = JSON.parse(uiStateJson);
-      // 必須キーの存在をチェック
-      if (uiState.message !== undefined && uiState.status !== undefined) {
-        return uiState;
-      }
-    } catch (e) {
-      Logger.log(`UI State JSONのパースに失敗しました: ${e.message}. Fallback to full state.`);
-    }
-  }
+  try {
+    const reliableStateJson = PropertiesService.getScriptProperties().getProperty(UI_STATE_KEY);
+    const reliableState = reliableStateJson ? JSON.parse(reliableStateJson) : {};
 
-  // PropertiesServiceに値がない、または無効な場合のフォールバック
-  const state = getState();
-  return {
-    message: state.message,
-    status: state.status,
-    processed: state.processedActions || 0,
-    total: state.actions ? state.actions.length : 0,
-    startTime: state.startTime,
-  };
+    const message = CacheService.getScriptCache().get(UI_MESSAGE_KEY) || 'メッセージを取得中...';
+
+    // 必須キーが存在しない場合は、フォールバックとして完全な状態から構築する
+    if (!reliableState.status) {
+      const state = getState();
+      return {
+        message: state.message,
+        status: state.status,
+        processed: state.processedActions || 0,
+        total: state.actions ? state.actions.length : 0,
+        startTime: state.startTime,
+      };
+    }
+
+    return { ...reliableState, message };
+
+  } catch (e) {
+    Logger.log(`Failed to get hybrid UI status: ${e.message}`);
+    return {
+      message: `UIステータスの取得中にエラーが発生しました: ${e.message}`,
+      status: 'ERROR',
+      processed: 0,
+      total: 0,
+      startTime: null,
+    };
+  }
 }
 
 function getSyncStatus() { return getState(); }
