@@ -1,90 +1,152 @@
-<!-- --------------------------------- -->
-<!-- UI定義ファイル（dialog.html） -->
-<!-- --------------------------------- -->
 <!DOCTYPE html>
 <html>
-  <head>
-    <base target="_top">
-    <!-- Google標準のCSSを適用 -->
-    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/styles.css">
-    <style>
-      body { padding: 20px; font-family: Arial, sans-serif; }
-      .form-group { margin-bottom: 15px; }
-      label { display: block; margin-bottom: 5px; font-weight: bold; }
-      input[type="text"] { width: 100%; box-sizing: border-box; }
-      .button-bar { margin-top: 20px; }
-      #message { margin-top: 15px; font-size: 0.9em; }
-      .loading { color: #888; }
-      .error { color: red; }
-    </style>
-  </head>
-  <body>
-    <h3>フォルダコピー設定</h3>
-    <p>コピー元・コピー先のフォルダIDまたはURL、<br>コピー先に作成するフォルダ名を入力してください。</p>
+<head>
+  <base target="_top">
+  <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/styles.css">
+  <style>
+    body { padding: 20px; font-family: Arial, sans-serif; }
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; font-weight: bold; }
+    input[type="text"] { width: 100%; box-sizing: border-box; }
+    .button-bar { margin-top: 20px; display: flex; justify-content: space-between; }
+    #status-container { margin-top: 20px; padding: 10px; border: 1px solid #ccc; background-color: #f9f9f9; min-height: 50px; }
+    .running { color: #0072c6; }
+    .done { color: #107c10; }
+    .error { color: #d83b01; font-weight: bold; }
+    .idle { color: #555; }
+  </style>
+</head>
+<body>
+  <h3>フォルダ同期設定</h3>
+  <p>コピー元と同期先のフォルダID（またはURL）を入力してください。<br>同期先に存在しないファイルやフォルダがコピーされます。</p>
 
-    <div class="form-group">
-      <label for="sourceFolder">1. コピー元のフォルダID (または URL)</label>
-      <input type="text" id="sourceFolder" class="action">
+  <div class="form-group">
+    <label for="sourceFolder">1. コピー元フォルダ</label>
+    <input type="text" id="sourceFolder" placeholder="例: 1a2b3c...">
+  </div>
+
+  <div class="form-group">
+    <label for="destFolder">2. 同期先フォルダ</label>
+    <input type="text" id="destFolder" placeholder="例: 4x5y6z...">
+  </div>
+
+  <div class="button-bar">
+    <div>
+      <button id="startButton" class="action" onclick="startSync()">同期を開始</button>
+      <button id="stopButton" onclick="stopSync()">強制停止</button>
     </div>
+    <button onclick="google.script.host.close()">閉じる</button>
+  </div>
 
-    <div class="form-group">
-      <label for="destParentFolder">2. コピー先の親フォルダID (または URL)</label>
-      <input type="text" id="destParentFolder" class="action">
-    </div>
+  <div id="status-container">
+    <h4>現在のステータス</h4>
+    <div id="status" class="idle">待機中</div>
+  </div>
 
-    <div class="form-group">
-      <label for="newFolderName">3. コピー先に作成するフォルダ名</label>
-      <input type="text" id="newFolderName" class="action">
-    </div>
+  <script>
+    let poller; // setIntervalのIDを保持
 
-    <div class="button-bar">
-      <button id="submitButton" class="action" onclick="submitForm()">コピーを実行</button>
-      <button onclick="google.script.host.close()">閉じる</button>
-    </div>
+    // ダイアログが開かれたときに現在の状態をサーバーに問い合わせる
+    document.addEventListener('DOMContentLoaded', () => {
+      pollStatus();
+      // 5秒ごとにステータスを自動更新
+      poller = setInterval(pollStatus, 5000);
+    });
 
-    <div id="message"></div>
+    // 同期開始ボタンが押されたときの処理
+    function startSync() {
+      const sourceFolder = document.getElementById('sourceFolder').value;
+      const destFolder = document.getElementById('destFolder').value;
 
-    <script>
-      function submitForm() {
-        const submitBtn = document.getElementById('submitButton');
-        const messageDiv = document.getElementById('message');
-        
-        // 処理中はボタンを無効化
-        submitBtn.disabled = true;
-        messageDiv.textContent = 'コピー処理を実行中です...（ファイル数が多いと時間がかかります）';
-        messageDiv.className = 'loading';
-
-        // フォームデータをオブジェクトとして取得
-        const formData = {
-          sourceFolder: document.getElementById('sourceFolder').value,
-          destParentFolder: document.getElementById('destParentFolder').value,
-          newFolderName: document.getElementById('newFolderName').value
-        };
-        
-        // GASサーバー側の 'startFolderCopy' 関数を呼び出す
-        google.script.run
-          .withSuccessHandler(onSuccess)
-          .withFailureHandler(onFailure)
-          .startFolderCopy(formData);
+      if (!sourceFolder || !destFolder) {
+        updateStatus({ status: 'ERROR', message: 'コピー元と同期先の両方を入力してください。' });
+        return;
       }
 
-      // 成功時のコールバック
-      function onSuccess(message) {
-        // 成功したらダイアログを閉じる
-        google.script.host.close();
-        // 完了メッセージは .gs 側の ui.alert で表示される
+      setControlsState(true); // コントロールを無効化
+      updateStatus({ status: 'RUNNING', message: '同期ジョブを開始しています...' });
+
+      const folderIds = { sourceFolder, destFolder };
+      google.script.run
+        .withSuccessHandler(() => pollStatus()) // 成功したらポーリングを開始
+        .withFailureHandler(handleFailure)
+        .startSyncJob(folderIds);
+    }
+
+    // 強制停止ボタンが押されたときの処理
+    function stopSync() {
+      setControlsState(true);
+      updateStatus({ status: 'IDLE', message: 'ジョブを停止しています...' });
+      google.script.run
+        .withSuccessHandler(() => pollStatus())
+        .withFailureHandler(handleFailure)
+        .stopSyncJob();
+    }
+
+    // サーバーに現在の状態を問い合わせる
+    function pollStatus() {
+      google.script.run
+        .withSuccessHandler(updateStatus)
+        .withFailureHandler(handleFailure)
+        .getSyncStatus();
+    }
+
+    // 受け取ったステータスオブジェクトでUIを更新する
+    function updateStatus(state) {
+      const statusDiv = document.getElementById('status');
+      const sourceFolderInput = document.getElementById('sourceFolder');
+      const destFolderInput = document.getElementById('destFolder');
+
+      if (!state) {
+        statusDiv.className = 'error';
+        statusDiv.textContent = 'ステータスを取得できませんでした。';
+        setControlsState(false);
+        return;
       }
 
-      // 失敗時のコールバック
-      function onFailure(error) {
-        const messageDiv = document.getElementById('message');
-        messageDiv.textContent = 'エラー: ' + error.message;
-        messageDiv.className = 'error';
-        
-        // ボタンを再度有効化
-        document.getElementById('submitButton').disabled = false;
-        // 失敗メッセージは .gs 側の ui.alert でも表示される
+      // 入力欄にIDを反映（実行中の場合）
+      if (state.sourceFolderId) sourceFolderInput.value = state.sourceFolderId;
+      if (state.destFolderId) destFolderInput.value = state.destFolderId;
+
+      statusDiv.textContent = state.message || state.status;
+
+      switch(state.status) {
+        case 'RUNNING':
+          statusDiv.className = 'running';
+          setControlsState(true);
+          break;
+        case 'DONE':
+          statusDiv.className = 'done';
+          setControlsState(false);
+          clearInterval(poller); // 完了したらポーリングを停止
+          break;
+        case 'ERROR':
+          statusDiv.className = 'error';
+          setControlsState(false);
+          clearInterval(poller);
+          break;
+        case 'IDLE':
+        default:
+          statusDiv.className = 'idle';
+          setControlsState(false);
+          break;
       }
-    </script>
-  </body>
+    }
+
+    // 予期せぬエラーが発生した場合の処理
+    function handleFailure(error) {
+      updateStatus({ status: 'ERROR', message: error.message });
+      clearInterval(poller);
+    }
+
+    // ボタンや入力欄の有効/無効を切り替える
+    function setControlsState(syncing) {
+      document.getElementById('startButton').disabled = syncing;
+      document.getElementById('sourceFolder').disabled = syncing;
+      document.getElementById('destFolder').disabled = syncing;
+      // 停止ボタンは常に有効にしておく（いつでも停止できるように）
+      // document.getElementById('stopButton').disabled = !syncing;
+    }
+  </script>
+</body>
 </html>
