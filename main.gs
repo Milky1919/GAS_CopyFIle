@@ -4,6 +4,12 @@
 
 // 状態を保存するためのキー
 const STATE_KEY = 'SYNC_STATE';
+const UI_STATE_KEY = 'SYNC_UI_STATE'; // UIポーリング用の軽量な状態を保存するキー
+const STATE_SOURCE_MAP_KEY = 'SYNC_STATE_SOURCE_MAP';
+const STATE_DEST_MAP_KEY = 'SYNC_STATE_DEST_MAP';
+const STATE_ACTIONS_KEY = 'SYNC_STATE_ACTIONS';
+const STATE_SCAN_QUEUE_KEY = 'SYNC_STATE_SCAN_QUEUE';
+
 
 // 処理を再開するためのトリガーとして設定する関数名
 const TRIGGER_HANDLER_NAME = 'mainTriggerHandler';
@@ -58,16 +64,112 @@ function getDefaultState() {
   };
 }
 
+// Helper function to load string chunks from cache and reconstruct the object
+function loadAndUnchunk(cache, baseKey, numChunks) {
+  if (!numChunks) return null;
+
+  let jsonString = '';
+  for (let i = 0; i < numChunks; i++) {
+    const chunk = cache.get(`${baseKey}_${i}`);
+    if (chunk) {
+      jsonString += chunk;
+    }
+  }
+
+  if (jsonString === '') return null;
+  return JSON.parse(jsonString);
+}
+
 function getState() {
   const cache = CacheService.getScriptCache();
-  const stateJson = cache.get(STATE_KEY);
-  return stateJson ? JSON.parse(stateJson) : getDefaultState();
+
+  const mainStateJson = cache.get(STATE_KEY);
+  if (!mainStateJson) {
+    return getDefaultState();
+  }
+
+  const mainState = JSON.parse(mainStateJson);
+
+  const sourceMap = loadAndUnchunk(cache, STATE_SOURCE_MAP_KEY, mainState.sourceMapChunks) || {};
+  const destMap = loadAndUnchunk(cache, STATE_DEST_MAP_KEY, mainState.destMapChunks) || {};
+  const scanQueue = loadAndUnchunk(cache, STATE_SCAN_QUEUE_KEY, mainState.scanQueueChunks) || [];
+  const actions = loadAndUnchunk(cache, STATE_ACTIONS_KEY, mainState.actionChunks) || [];
+
+  return {
+    ...mainState,
+    sourceMap: sourceMap,
+    destMap: destMap,
+    scanQueue: scanQueue,
+    actions: actions,
+  };
+}
+
+// Helper function to chunk a string and save the chunks to cache
+function chunkAndSave(cache, baseKey, data) {
+  if (!data || (Array.isArray(data) && data.length === 0) || (typeof data === 'object' && Object.keys(data).length === 0 && data.constructor === Object)) {
+    return 0;
+  }
+
+  const jsonString = JSON.stringify(data);
+  const totalLength = jsonString.length;
+  const MAX_CHUNK_LENGTH = 80000; // 80k characters as a safe chunk size
+  let chunkIndex = 0;
+
+  for (let i = 0; i < totalLength; i += MAX_CHUNK_LENGTH) {
+    const chunk = jsonString.substring(i, i + MAX_CHUNK_LENGTH);
+    cache.put(`${baseKey}_${chunkIndex}`, chunk, 21600);
+    chunkIndex++;
+  }
+
+  return chunkIndex;
 }
 
 function setState(state) {
   const cache = CacheService.getScriptCache();
-  const stateJson = JSON.stringify(state, null, 2);
-  cache.put(STATE_KEY, stateJson, 21600); // 6 hours expiration
+
+  const { sourceMap, destMap, actions, scanQueue, ...mainState } = state;
+
+  mainState.sourceMapChunks = chunkAndSave(cache, STATE_SOURCE_MAP_KEY, sourceMap || {});
+  mainState.destMapChunks = chunkAndSave(cache, STATE_DEST_MAP_KEY, destMap || {});
+  mainState.scanQueueChunks = chunkAndSave(cache, STATE_SCAN_QUEUE_KEY, scanQueue || []);
+  mainState.actionChunks = chunkAndSave(cache, STATE_ACTIONS_KEY, actions || []);
+
+  cache.put(STATE_KEY, JSON.stringify(mainState, null, 2), 21600);
+}
+
+/**
+ * UIのポーリング用に、単一で信頼性の高いPropertiesServiceを使用してステータスを書き込む。
+ * メッセージは、"Argument too large"エラーを絶対に回避するため、積極的に短い長さに切り詰める。
+ * @param {object} uiState - UIに表示するための軽量な状態オブジェクト。
+ *                           {message: string, status: string, processed: number, total: number, startTime: number}
+ */
+function setUIStatus(uiState) {
+  try {
+    // メッセージが長すぎる場合は、エラーを回避するために積極的に切り詰める
+    const truncatedMessage = (uiState.message && uiState.message.length > 100)
+      ? uiState.message.substring(0, 97) + '...'
+      : uiState.message;
+
+    const finalUIState = { ...uiState, message: truncatedMessage };
+
+    PropertiesService.getScriptProperties().setProperty(UI_STATE_KEY, JSON.stringify(finalUIState));
+
+  } catch (e) {
+    Logger.log(`Failed to set UI status: ${e.message}`);
+    // フォールバックとして、最小限のエラー状態を書き込む試み
+    try {
+        const errorState = {
+          message: '致命的なエラーが発生しました。詳細はログを確認してください。',
+          status: 'ERROR',
+          processed: 0,
+          total: 0,
+          startTime: uiState.startTime
+        };
+        PropertiesService.getScriptProperties().setProperty(UI_STATE_KEY, JSON.stringify(errorState));
+    } catch (e2) {
+        Logger.log(`Failed to set fallback UI error status: ${e2.message}`);
+    }
+  }
 }
 
 
@@ -80,6 +182,39 @@ function getFolderIdFromInput(input) {
   if (input.includes('folders/')) return input.split('folders/')[1].split('/')[0].split('?')[0];
   if (input.includes('id=')) return input.split('id=')[1].split('&')[0];
   return input;
+}
+
+/**
+ * UIがポーリングするために、信頼性の高いPropertiesServiceからステータスを読み出す。
+ */
+function getUIStatus() {
+  try {
+    const uiStateJson = PropertiesService.getScriptProperties().getProperty(UI_STATE_KEY);
+
+    if (uiStateJson) {
+      return JSON.parse(uiStateJson);
+    }
+
+    // PropertiesServiceに値がない場合は、フォールバックとして完全な状態から構築する
+    const state = getState();
+    return {
+      message: state.message,
+      status: state.status,
+      processed: state.processedActions || 0,
+      total: state.actions ? state.actions.length : 0,
+      startTime: state.startTime,
+    };
+
+  } catch (e) {
+    Logger.log(`Failed to get UI status: ${e.message}`);
+    return {
+      message: `UIステータスの取得中にエラーが発生しました: ${e.message}`,
+      status: 'ERROR',
+      processed: 0,
+      total: 0,
+      startTime: null,
+    };
+  }
 }
 
 function getSyncStatus() { return getState(); }
@@ -111,22 +246,47 @@ function startSyncJob(folderIds) {
         { type: 'source', folderId: sourceFolderId, path: '' },
         { type: 'dest', folderId: destFolderId, path: '' },
       ],
-      sourceMap: { '': {id: sourceFolderId, name: sourceRoot.name, type: 'folder', children: {}} },
-      destMap: { '': {id: destFolderId, name: destRoot.name, type: 'folder', children: {}} },
+      sourceMap: { '': {id: sourceFolderId, name: sourceRoot.name, type: 'folder'} },
+      destMap: { '': {id: destFolderId, name: destRoot.name, type: 'folder'} },
     };
     setState(initialState);
+    setUIStatus({
+      message: initialState.message,
+      status: initialState.status,
+      processed: 0,
+      total: 0,
+      startTime: initialState.startTime,
+    });
 
     ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
   } catch (e) {
     Logger.log(`Error in startSyncJob: ${e.stack}`);
-    setState({ ...getState(), status: 'ERROR', message: e.message, lastError: e.message });
+    const errorMessage = (e.message && e.message.substring(0, 500)) || 'An unknown error occurred.';
+    const errorStack = (e.stack && e.stack.substring(0, 2000)) || '';
+    const errorState = { ...getState(), status: 'ERROR', message: errorMessage, lastError: errorStack };
+    setState(errorState);
+    setUIStatus({
+      message: errorMessage,
+      status: 'ERROR',
+      processed: 0,
+      total: 0,
+      startTime: errorState.startTime,
+    });
     throw e;
   }
 }
 
 function stopSyncJob() {
   deleteTriggers();
-  setState(getDefaultState());
+  const defaultState = getDefaultState();
+  setState(defaultState);
+  setUIStatus({
+    message: 'ユーザーによって停止されました。',
+    status: defaultState.status,
+    processed: 0,
+    total: 0,
+    startTime: null,
+  });
   Logger.log('同期ジョブがユーザーによって停止されました。');
 }
 
@@ -162,6 +322,13 @@ function mainTriggerHandler() {
       deleteTriggers();
       state.message = "一時中断中... 次の処理を準備しています。";
       setState(state);
+      setUIStatus({
+        message: state.message,
+        status: state.status,
+        processed: state.processedActions,
+        total: state.actions.length,
+        startTime: state.startTime,
+      });
       ScriptApp.newTrigger(TRIGGER_HANDLER_NAME).timeBased().after(1000).create();
     } else {
       deleteTriggers();
@@ -169,10 +336,19 @@ function mainTriggerHandler() {
 
   } catch (e) {
     Logger.log(`ERROR in mainTriggerHandler: ${e.stack}`);
+    const errorMessage = `エラーが発生しました: ${(e.message && e.message.substring(0, 500)) || '不明なエラー'}`;
+    const errorStack = (e.stack && e.stack.substring(0, 2000)) || '';
     state.status = 'ERROR';
-    state.message = `エラーが発生しました: ${e.message}`;
-    state.lastError = e.stack;
+    state.message = errorMessage;
+    state.lastError = errorStack;
     deleteTriggers();
+    setUIStatus({
+        message: errorMessage,
+        status: 'ERROR',
+        processed: state.processedActions || 0,
+        total: state.actions ? state.actions.length : 0,
+        startTime: state.startTime,
+      });
   } finally {
     setState(state);
   }
@@ -183,15 +359,20 @@ function runPlanningPhase(state, startTime) {
     while (state.scanQueue.length > 0 && (Date.now() - startTime) < EXECUTION_LIMIT_MS) {
         const item = state.scanQueue.shift();
         const parentMap = (item.type === 'source') ? state.sourceMap : state.destMap;
-        state.message = `フォルダ情報をスキャン中: ${item.path || '/'}`;
-
+        state.message = `フォルダ情報をスキャン中: ${truncatePathForUI(item.path) || '/'}`;
+        setUIStatus({
+          message: state.message,
+          status: state.status,
+          processed: Object.keys(state.sourceMap).length + Object.keys(state.destMap).length - 2,
+          total: state.totalFiles + state.totalFolders,
+          startTime: state.startTime,
+        });
         const children = getChildren(item.folderId);
-        let currentPathMap = getObjectByPath(parentMap, item.path);
 
         for (const child of children) {
             const childPath = item.path ? `${item.path}/${child.name}` : child.name;
             const isFolder = child.mimeType === 'application/vnd.google-apps.folder';
-            currentPathMap.children[child.name] = { id: child.id, type: isFolder ? 'folder' : 'file', modifiedTime: child.modifiedTime, children: isFolder ? {} : undefined };
+            parentMap[childPath] = { id: child.id, type: isFolder ? 'folder' : 'file', modifiedTime: child.modifiedTime };
             if (isFolder) {
                 state.scanQueue.push({ type: item.type, folderId: child.id, path: childPath });
                 if (item.type === 'source') state.totalFolders++;
@@ -212,49 +393,47 @@ function runPlanningPhase(state, startTime) {
 
 function runGenerateActionsPhase(state) {
     state.message = "変更点を分析し、同期計画を作成しています...";
+    setUIStatus({
+      message: state.message,
+      status: state.status,
+      processed: 0,
+      total: 0,
+      startTime: state.startTime,
+    });
+
     const actions = [];
-    const addActionsForNewFolder = (sourceNode, parentPath) => {
-        for (const name in sourceNode.children) {
-            const child = sourceNode.children[name];
-            const currentPath = parentPath ? `${parentPath}/${name}` : name;
-            if (child.type === 'folder') {
-                actions.push({ type: 'CREATE_FOLDER', path: currentPath });
-                addActionsForNewFolder(child, currentPath);
+    const sortedSourcePaths = Object.keys(state.sourceMap).sort();
+
+    for (const path of sortedSourcePaths) {
+        if (path === '') continue; // Skip root
+
+        const sourceNode = state.sourceMap[path];
+        const destNode = state.destMap[path];
+
+        if (!destNode) {
+            // Destination doesn't exist, create it
+            if (sourceNode.type === 'folder') {
+                actions.push({ type: 'CREATE_FOLDER', path: path });
             } else {
-                actions.push({ type: 'COPY_FILE', path: currentPath, sourceId: child.id });
+                actions.push({ type: 'COPY_FILE', path: path, sourceId: sourceNode.id });
             }
-        }
-    };
-    const compareFolders = (sourceNode, destNode, path) => {
-        for (const name in sourceNode.children) {
-            const sourceChild = sourceNode.children[name];
-            const destChild = destNode.children[name];
-            const currentPath = path ? `${path}/${name}` : name;
-            if (!destChild) {
-                if (sourceChild.type === 'folder') {
-                    actions.push({ type: 'CREATE_FOLDER', path: currentPath });
-                    addActionsForNewFolder(sourceChild, currentPath);
-                } else {
-                    actions.push({ type: 'COPY_FILE', path: currentPath, sourceId: sourceChild.id });
-                }
-            } else {
-                 if (sourceChild.type === 'file' && destChild.type === 'file') {
-                    const sourceModified = new Date(sourceChild.modifiedTime).getTime();
-                    const destModified = new Date(destChild.modifiedTime).getTime();
-                    if (sourceModified > destModified) {
-                        actions.push({ type: 'UPDATE_FILE', path: currentPath, sourceId: sourceChild.id, destId: destChild.id });
-                    }
-                } else if (sourceChild.type === 'folder' && destChild.type === 'folder') {
-                    compareFolders(sourceChild, destChild, currentPath);
+        } else {
+            // Destination exists, check for updates
+            if (sourceNode.type === 'file' && destNode.type === 'file') {
+                const sourceModified = new Date(sourceNode.modifiedTime).getTime();
+                const destModified = new Date(destNode.modifiedTime).getTime();
+                if (sourceModified > destModified) {
+                    actions.push({ type: 'UPDATE_FILE', path: path, sourceId: sourceNode.id, destId: destNode.id });
                 }
             }
         }
-    };
-    compareFolders(state.sourceMap[''], state.destMap[''], '');
+    }
+
     state.actions = actions;
     state.phase = 'EXECUTING';
     return state;
 }
+
 
 function runExecutingPhase(state, startTime) {
     let lastSaveTime = Date.now();
@@ -265,7 +444,7 @@ function runExecutingPhase(state, startTime) {
 
             const parentPath = getParentPath(action.path);
             const fileName = getFileName(action.path);
-            const parentNode = getObjectByPath(state.destMap, parentPath);
+            const parentNode = state.destMap[parentPath];
 
             if (!parentNode) {
                 throw new Error(`親フォルダが見つかりません: ${action.path}`);
@@ -278,13 +457,20 @@ function runExecutingPhase(state, startTime) {
                 case 'UPDATE_FILE': actionText = 'ファイル更新'; break;
                 default: actionText = '処理中';
             }
-            state.message = `${actionText}: ${action.path} ${progress}`;
+            state.message = `${actionText}: ${truncatePathForUI(action.path)} ${progress}`;
+            setUIStatus({
+              message: state.message,
+              status: state.status,
+              processed: state.processedActions + 1,
+              total: state.actions.length,
+              startTime: state.startTime,
+            });
 
             switch(action.type) {
                 case 'CREATE_FOLDER':
                     const newFolder = { name: fileName, parents: [parentNode.id], mimeType: 'application/vnd.google-apps.folder' };
                     const createdFolder = Drive.Files.create(newFolder, null, { supportsAllDrives: true, fields: 'id' });
-                    parentNode.children[fileName] = { id: createdFolder.id, type: 'folder', children: {} };
+                    state.destMap[action.path] = { id: createdFolder.id, type: 'folder' };
                     break;
 
                 case 'COPY_FILE':
@@ -315,6 +501,13 @@ function runExecutingPhase(state, startTime) {
         const elapsedTime = (Date.now() - state.startTime) / 1000;
         state.message = `同期が完了しました。(${state.totalFolders}フォルダ, ${state.totalFiles}ファイル) 経過時間: ${Math.round(elapsedTime)}秒`;
         setState(state);
+        setUIStatus({
+          message: state.message,
+          status: state.status,
+          processed: state.processedActions,
+          total: state.actions.length,
+          startTime: state.startTime,
+        });
     }
     return state;
 }
@@ -322,6 +515,16 @@ function runExecutingPhase(state, startTime) {
 // =================================================
 // Helper Functions
 // =================================================
+
+function truncatePathForUI(path, maxLength = 80) {
+    if (!path || path.length <= maxLength) return path;
+    const fileName = getFileName(path);
+    if (fileName.length >= maxLength - 4) {
+        return '...' + fileName.slice(-maxLength + 4);
+    }
+    const parentPath = getParentPath(path);
+    return parentPath.substring(0, maxLength - fileName.length - 4) + '.../' + fileName;
+}
 
 function getChildren(folderId) {
   const children = [];
@@ -340,14 +543,6 @@ function getChildren(folderId) {
     pageToken = response.nextPageToken;
   } while (pageToken);
   return children;
-}
-
-function getObjectByPath(obj, path) {
-    if (path === '') return obj[''];
-    return path.split('/').reduce((acc, part) => {
-        if (!acc || !acc.children || !acc.children[part]) return null;
-        return acc.children[part];
-    }, obj['']);
 }
 
 function getParentPath(path) {
